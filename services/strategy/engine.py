@@ -271,13 +271,24 @@ class StrategyEngine:
         self._running = False
         self._scan_task: Optional[asyncio.Task] = None
         self._confirm_task: Optional[asyncio.Task] = None
+        self._subscriptions: List[str] = []
+        
+        # 市场状态和优化参数
+        self._current_regime: str = "ranging"
+        self._regime_multiplier: Dict[str, float] = {"SHORT": 1.0, "LONG": 1.0}
+        self._optimized_params: Dict[str, Any] = {}
         
         # 注册默认策略
         self._register_default_strategies()
     
     def _register_default_strategies(self) -> None:
         """注册默认策略"""
+        from strategies.long_oversold import LongOversoldStrategy
+        from strategies.prepump_sniffer import PrePumpSnifferStrategy
+        
         self._strategies["short_overbought"] = ShortOverboughtStrategy(self.datafeed)
+        self._strategies["long_oversold"] = LongOversoldStrategy(self.datafeed)
+        self._strategies["prepump_sniffer"] = PrePumpSnifferStrategy(self.datafeed)
     
     def register_strategy(self, strategy: BaseStrategy) -> None:
         """注册策略"""
@@ -291,6 +302,9 @@ class StrategyEngine:
         
         self._running = True
         
+        # 注册事件监听 (P0-4, P0-5)
+        await self._register_event_listeners()
+        
         # 启动扫描和确认任务
         self._scan_task = asyncio.create_task(self._scan_loop())
         self._confirm_task = asyncio.create_task(self._confirm_loop())
@@ -300,6 +314,12 @@ class StrategyEngine:
     async def stop(self) -> None:
         """停止策略引擎"""
         self._running = False
+        
+        # 取消事件订阅
+        bus = await get_event_bus()
+        for sub_id in self._subscriptions:
+            await bus.unsubscribe(sub_id)
+        self._subscriptions.clear()
         
         if self._scan_task:
             self._scan_task.cancel()
@@ -316,6 +336,67 @@ class StrategyEngine:
                 pass
         
         logger.info("StrategyEngine stopped")
+    
+    async def _register_event_listeners(self) -> None:
+        """注册事件监听"""
+        bus = await get_event_bus()
+        
+        # P0-4: 监听市场状态变化
+        sub_id = await bus.subscribe(
+            EventType.MARKET_REGIME_CHANGED,
+            self._on_regime_changed,
+            "strategy_regime"
+        )
+        self._subscriptions.append(sub_id)
+        
+        # P0-5: 监听优化参数更新
+        sub_id = await bus.subscribe(
+            EventType.OPTIMIZATION_PARAMS_UPDATED,
+            self._on_params_updated,
+            "strategy_params"
+        )
+        self._subscriptions.append(sub_id)
+        
+        logger.info("StrategyEngine event listeners registered")
+    
+    async def _on_regime_changed(self, event) -> None:
+        """处理市场状态变化"""
+        data = event.data
+        old_regime = data.get("old_regime", "unknown")
+        new_regime = data.get("new_regime", "ranging")
+        
+        self._current_regime = new_regime
+        
+        # 更新策略乘数
+        from strategies.macro_filter import get_macro_filter
+        macro_filter = get_macro_filter()
+        
+        self._regime_multiplier = {
+            "SHORT": macro_filter.get_regime_multiplier("SHORT"),
+            "LONG": macro_filter.get_regime_multiplier("LONG"),
+        }
+        
+        logger.info(
+            f"StrategyEngine regime changed: {old_regime} -> {new_regime} "
+            f"multipliers={self._regime_multiplier}"
+        )
+    
+    async def _on_params_updated(self, event) -> None:
+        """处理优化参数更新"""
+        data = event.data
+        strategy_name = data.get("strategy", "")
+        params = data.get("params", {})
+        
+        if strategy_name in self._strategies:
+            # 更新策略配置
+            strategy = self._strategies[strategy_name]
+            if hasattr(strategy, '_config'):
+                strategy._config.update(params)
+                logger.info(f"Strategy {strategy_name} params updated: {params}")
+            else:
+                logger.warning(f"Strategy {strategy_name} has no _config attribute")
+        
+        self._optimized_params.update(params)
     
     async def _scan_loop(self) -> None:
         """扫描循环"""

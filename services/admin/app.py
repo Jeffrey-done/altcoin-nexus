@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from core.config import get_settings, reload_settings
-from core.db import TradeRepository, CandidateRepository, RiskRepository, EventRepository
+from core.db import TradeRepository, CandidateRepository, RiskRepository, EventRepository, SystemStateRepository
 from core.events import EventType, get_event_bus
 
 logger = logging.getLogger("nexus.admin")
@@ -196,8 +196,21 @@ def create_app() -> FastAPI:
     
     # ==================== 一体化指令 API ====================
     
-    # 黑名单存储（运行时内存）
+    # 黑名单存储（持久化到数据库）
     _blacklist: set = set()
+    
+    # 启动时加载黑名单
+    @app.on_event("startup")
+    async def load_blacklist():
+        nonlocal _blacklist
+        try:
+            stored = await SystemStateRepository.get("blacklist")
+            if stored:
+                import json
+                _blacklist = set(json.loads(stored))
+                logger.info(f"Loaded blacklist from DB: {_blacklist}")
+        except Exception as e:
+            logger.warning(f"Failed to load blacklist: {e}")
     
     @app.post("/api/execution/panic-sell-all")
     async def panic_sell_all():
@@ -205,38 +218,38 @@ def create_app() -> FastAPI:
         紧急全平仓
         
         立即触发所有持仓的市价平仓单，并进入休眠模式
+        通过事件总线通知所有服务，而非直接操作数据库
         """
         logger.warning("PANIC SELL ALL triggered!")
         
         bus = await get_event_bus()
         
-        # 发布系统恐慌事件
+        # 发布系统恐慌事件 - 通过事件总线通知所有服务
         await bus.publish(EventType.SYSTEM_PANIC, {
             "reason": "Manual panic sell triggered",
             "action": "close_all",
+            "triggered_by": "admin",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         })
         
-        # 获取所有持仓
+        # 获取所有持仓用于返回结果
         open_trades = await TradeRepository.get_open()
         
-        closed_count = 0
-        for trade in open_trades:
-            try:
-                await TradeRepository.close_trade(
-                    trade_id=trade["id"],
-                    pnl=trade.get("pnl", 0),
-                    close_price=trade.get("current_price", 0),
-                    close_reason="PANIC SELL ALL",
-                    close_type="panic",
-                )
-                closed_count += 1
-            except Exception as e:
-                logger.error(f"Failed to close trade {trade['id']}: {e}")
+        # 注意：实际平仓由 ExecutionRouter 通过订阅 SYSTEM_PANIC 事件来执行
+        # 这里只负责发布事件和返回当前持仓信息
         
         return {
             "status": "ok",
-            "closed_trades": closed_count,
-            "message": "All positions closed, system entering safe mode",
+            "open_trades": len(open_trades),
+            "trades": [
+                {
+                    "symbol": t.get("symbol"),
+                    "direction": t.get("direction"),
+                    "stake": t.get("stake"),
+                }
+                for t in open_trades
+            ],
+            "message": "PANIC event published. ExecutionRouter will close all positions.",
         }
     
     @app.post("/api/strategy/blacklist")
@@ -257,6 +270,10 @@ def create_app() -> FastAPI:
         
         _blacklist.add(symbol)
         
+        # 持久化到数据库
+        import json
+        await SystemStateRepository.set("blacklist", json.dumps(list(_blacklist)))
+        
         # 发布事件
         bus = await get_event_bus()
         await bus.publish("strategy.blacklist_added", {
@@ -276,6 +293,10 @@ def create_app() -> FastAPI:
     async def remove_from_blacklist(symbol: str):
         """从黑名单移除"""
         _blacklist.discard(symbol)
+        
+        # 持久化到数据库
+        import json
+        await SystemStateRepository.set("blacklist", json.dumps(list(_blacklist)))
         
         return {
             "status": "ok",

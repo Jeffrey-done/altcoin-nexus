@@ -9,13 +9,14 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from core.config import get_settings
+from core.config.refresh import ConfigRefreshMixin
 from core.db import RiskRepository, TradeRepository, get_db
 from core.events import EventType, get_event_bus
 
 logger = logging.getLogger("nexus.risk")
 
 
-class RiskControlService:
+class RiskControlService(ConfigRefreshMixin):
     """
     风控服务 - 事件驱动模式
     
@@ -53,13 +54,51 @@ class RiskControlService:
         
         self._running = True
         
+        # 从数据库加载暂停状态
+        await self._load_paused_states()
+        
         # 注册事件监听（主动风控）
         await self._register_event_listeners()
+        
+        # 设置配置热刷新
+        await self._setup_config_refresh()
         
         # 启动被动监控（兜底）
         self._monitor_task = asyncio.create_task(self._monitor_loop())
         
         logger.info("RiskControlService started (event-driven mode)")
+    
+    async def _load_paused_states(self) -> None:
+        """从数据库加载暂停状态"""
+        try:
+            # 获取所有风控状态
+            from core.db import get_db
+            from core.db.models import RiskStateModel
+            from sqlalchemy import select, and_
+            
+            db = await get_db()
+            async with db.session() as session:
+                now = datetime.now(timezone.utc)
+                result = await session.execute(
+                    select(RiskStateModel).where(
+                        and_(
+                            RiskStateModel.paused_until != None,
+                            RiskStateModel.paused_until > now.isoformat(),
+                        )
+                    )
+                )
+                states = result.scalars().all()
+                
+                for state in states:
+                    try:
+                        paused_until = datetime.fromisoformat(state.paused_until)
+                        if paused_until > now:
+                            self._paused_until[state.account_id] = paused_until
+                            logger.info(f"Loaded paused state: {state.account_id} until {paused_until}")
+                    except Exception as e:
+                        logger.warning(f"Failed to parse paused_until for {state.account_id}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to load paused states: {e}")
     
     async def stop(self) -> None:
         """停止风控服务"""
@@ -70,6 +109,9 @@ class RiskControlService:
         for sub_id in self._subscriptions:
             await bus.unsubscribe(sub_id)
         self._subscriptions.clear()
+        
+        # 清理配置刷新监听
+        await self._cleanup_config_refresh()
         
         # 停止被动监控
         if self._monitor_task:
@@ -133,13 +175,17 @@ class RiskControlService:
         
         self._stats["checks_total"] += 1
         
-        # 快速风控检查
-        can_open, reason = await self.check_can_open(
-            account_id=account_id,
-            symbol=symbol,
-            direction=direction,
-            stake=stake,
-        )
+        # 快速风控检查 - 异常时默认拒绝
+        try:
+            can_open, reason = await self.check_can_open(
+                account_id=account_id,
+                symbol=symbol,
+                direction=direction,
+                stake=stake,
+            )
+        except Exception as e:
+            logger.critical(f"Risk check FAILED with exception: {e} - BLOCKING signal")
+            can_open, reason = False, f"Risk check exception: {e}"
         
         if not can_open:
             self._stats["blocks_total"] += 1
@@ -267,9 +313,12 @@ class RiskControlService:
                 "consecutive_losses": consecutive_losses,
                 "limit": risk_config.consecutive_loss_pause,
             })
-            self._paused_until[account_id] = (
-                datetime.now(timezone.utc) + timedelta(hours=risk_config.pause_hours)
-            )
+            # 持久化暂停状态
+            paused_until = datetime.now(timezone.utc) + timedelta(hours=risk_config.pause_hours)
+            self._paused_until[account_id] = paused_until
+            await RiskRepository.update(account_id, {
+                "paused_until": paused_until.isoformat()
+            })
             return
         
         # 更新缓存

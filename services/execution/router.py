@@ -49,6 +49,7 @@ class ExecutionRouter:
         self._exchanges: Dict[str, ccxt.Exchange] = {}
         self._running = False
         self._pending_orders: Dict[str, Dict[str, Any]] = {}
+        self._subscriptions: List[str] = []
         
         # 统计
         self._stats = {
@@ -65,11 +66,21 @@ class ExecutionRouter:
         
         self._running = True
         await self._init_exchanges()
+        
+        # 注册事件监听
+        await self._register_event_listeners()
+        
         logger.info("ExecutionRouter started")
     
     async def stop(self) -> None:
         """停止执行路由器"""
         self._running = False
+        
+        # 取消事件订阅
+        bus = await get_event_bus()
+        for sub_id in self._subscriptions:
+            await bus.unsubscribe(sub_id)
+        self._subscriptions.clear()
         
         for name, exchange in self._exchanges.items():
             try:
@@ -79,6 +90,58 @@ class ExecutionRouter:
         
         self._exchanges.clear()
         logger.info("ExecutionRouter stopped")
+    
+    async def _register_event_listeners(self) -> None:
+        """注册事件监听"""
+        bus = await get_event_bus()
+        
+        # 监听系统恐慌事件 - 紧急全平仓
+        sub_id = await bus.subscribe(
+            EventType.SYSTEM_PANIC,
+            self._on_system_panic,
+            "execution_panic"
+        )
+        self._subscriptions.append(sub_id)
+        
+        logger.info("ExecutionRouter event listeners registered")
+    
+    async def _on_system_panic(self, event) -> None:
+        """处理系统恐慌事件 - 紧急全平仓"""
+        data = event.data
+        reason = data.get("reason", "Unknown")
+        action = data.get("action", "")
+        
+        logger.critical(f"SYSTEM PANIC received: {reason} action={action}")
+        
+        if action == "close_all":
+            # 获取所有持仓并平仓
+            from core.db import TradeRepository
+            open_trades = await TradeRepository.get_open()
+            
+            closed_count = 0
+            for trade in open_trades:
+                try:
+                    symbol = trade.get("symbol", "")
+                    direction = trade.get("direction", "")
+                    amount = trade.get("shares", 0)
+                    exchange = trade.get("exchange", "binance")
+                    
+                    if amount > 0:
+                        result = await self.execute_close(
+                            symbol=symbol,
+                            direction=direction,
+                            amount=amount,
+                            exchange=exchange,
+                            reason=f"PANIC: {reason}",
+                            priority=OrderPriority.URGENT,
+                        )
+                        if result:
+                            closed_count += 1
+                            logger.info(f"PANIC closed: {symbol} {direction}")
+                except Exception as e:
+                    logger.error(f"PANIC close failed for {trade.get('symbol')}: {e}")
+            
+            logger.critical(f"PANIC completed: {closed_count}/{len(open_trades)} positions closed")
     
     async def _init_exchanges(self) -> None:
         """初始化交易所连接"""
@@ -230,6 +293,20 @@ class ExecutionRouter:
             price = ticker["last"]
             amount = (stake * leverage) / price
             
+            # 发布订单发送事件 (P0-3: 补齐 EXECUTION_ORDER_SENT)
+            bus = await get_event_bus()
+            await bus.publish(EventType.EXECUTION_ORDER_SENT, {
+                "symbol": symbol,
+                "direction": direction,
+                "stake": stake,
+                "leverage": leverage,
+                "exchange": exchange,
+                "account_id": account_id,
+                "client_order_id": client_order_id,
+                "amount": amount,
+                "price": price,
+            })
+            
             # 执行下单
             side = "sell" if direction == "SHORT" else "buy"
             order = await ex.create_order(
@@ -264,14 +341,31 @@ class ExecutionRouter:
             self._stats["successful_orders"] += 1
             self._stats["total_slippage_pct"] += slippage_pct
             
-            # 发布事件
-            bus = await get_event_bus()
+            # 发布订单成交事件
             await bus.publish(EventType.EXECUTION_ORDER_FILLED, {
                 "symbol": symbol,
                 "direction": direction,
                 "order_id": order.get("id", ""),
                 "fill_price": fill_price,
                 "slippage_pct": slippage_pct,
+                "account_id": account_id,
+                "client_order_id": client_order_id,
+            })
+            
+            # 发布开仓事件 (P0-2: 补齐 TRADE_OPENED)
+            trade_id = f"trade_{uuid.uuid4().hex[:12]}"
+            await bus.publish(EventType.TRADE_OPENED, {
+                "trade_id": trade_id,
+                "symbol": symbol,
+                "direction": direction,
+                "stake": stake,
+                "leverage": leverage,
+                "entry_price": fill_price,
+                "exchange": exchange,
+                "account_id": account_id,
+                "strategy": strategy,
+                "order_id": order.get("id", ""),
+                "client_order_id": client_order_id,
             })
             
             logger.info(

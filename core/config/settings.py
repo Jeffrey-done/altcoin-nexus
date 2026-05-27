@@ -240,7 +240,7 @@ class Settings(BaseSettings):
                 print(f"Warning: Failed to load {yaml_file}: {e}")
     
     def _apply_overrides(self, data: Dict[str, Any], section: str) -> None:
-        """应用配置覆盖"""
+        """应用配置覆盖 - 支持嵌套结构"""
         if not isinstance(data, dict):
             return
         
@@ -258,9 +258,24 @@ class Settings(BaseSettings):
         
         if section in section_map:
             sub_settings = section_map[section]
-            for key, value in data.items():
-                if hasattr(sub_settings, key):
-                    setattr(sub_settings, key, value)
+            # 递归应用嵌套配置
+            self._apply_nested(data, sub_settings)
+    
+    def _apply_nested(self, data: Dict[str, Any], target: Any) -> None:
+        """递归应用嵌套配置"""
+        for key, value in data.items():
+            if isinstance(value, dict):
+                # 嵌套对象 - 递归处理
+                if hasattr(target, key):
+                    sub_target = getattr(target, key)
+                    if hasattr(sub_target, '__dict__'):
+                        self._apply_nested(value, sub_target)
+                    else:
+                        setattr(target, key, value)
+            else:
+                # 叶子节点 - 直接设置
+                if hasattr(target, key):
+                    setattr(target, key, value)
 
 
 @lru_cache()

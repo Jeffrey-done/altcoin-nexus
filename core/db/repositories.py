@@ -670,3 +670,60 @@ class SignalLogRepository:
                 "triggered": triggered,
                 "trigger_rate": round(triggered / max(total, 1) * 100, 1),
             }
+
+
+class SystemStateRepository:
+    """系统状态 Repository - 用于持久化黑名单等运行时状态"""
+
+    @staticmethod
+    async def get(key: str) -> Optional[str]:
+        """获取系统状态值"""
+        from .models import SystemStateModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                select(SystemStateModel).where(SystemStateModel.key == key)
+            )
+            state = result.scalar_one_or_none()
+            return state.value if state else None
+
+    @staticmethod
+    async def set(key: str, value: str) -> None:
+        """设置系统状态值"""
+        from .models import SystemStateModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                select(SystemStateModel).where(SystemStateModel.key == key)
+            )
+            state = result.scalar_one_or_none()
+            
+            if state:
+                state.value = value
+                state.updated_at = _utcnow()
+            else:
+                state = SystemStateModel(key=key, value=value)
+                session.add(state)
+            
+            await session.flush()
+
+    @staticmethod
+    async def delete(key: str) -> bool:
+        """删除系统状态"""
+        from .models import SystemStateModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                delete(SystemStateModel).where(SystemStateModel.key == key)
+            )
+            return result.rowcount > 0
+
+    @staticmethod
+    async def get_all() -> Dict[str, str]:
+        """获取所有系统状态"""
+        from .models import SystemStateModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(select(SystemStateModel))
+            states = result.scalars().all()
+            return {s.key: s.value for s in states}
