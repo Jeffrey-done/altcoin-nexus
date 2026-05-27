@@ -4,12 +4,15 @@
 """
 
 from .connection import AsyncDatabase, get_db
-from .models import Base, TradeModel, CandidateModel, RiskStateModel, ExecutionEventModel
+from .models import Base, TradeModel, CandidateModel, RiskStateModel, ExecutionEventModel, ExchangeAccountModel
 from .repositories import (
     TradeRepository,
     CandidateRepository,
     RiskRepository,
     EventRepository,
+    SignalLogRepository,
+    SystemStateRepository,
+    ExchangeAccountRepository,
 )
 
 __all__ = [
@@ -20,8 +23,12 @@ __all__ = [
     "CandidateModel",
     "RiskStateModel",
     "ExecutionEventModel",
+    "ExchangeAccountModel",
     "TradeRepository",
     "CandidateRepository",
     "RiskRepository",
     "EventRepository",
+    "SignalLogRepository",
+    "SystemStateRepository",
+    "ExchangeAccountRepository",
 ]
