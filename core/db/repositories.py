@@ -99,6 +99,36 @@ class TradeRepository:
             return True
 
     @staticmethod
+    async def update_with_lock(trade_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        带行级锁的更新 - 防止并发冲突
+        
+        使用 SELECT ... FOR UPDATE 锁定行，确保读-改-写的原子性
+        """
+        db = await get_db()
+        async with db.session() as session:
+            async with session.begin():
+                # 使用行级锁
+                result = await session.execute(
+                    select(TradeModel)
+                    .where(TradeModel.id == trade_id)
+                    .with_for_update()
+                )
+                trade = result.scalar_one_or_none()
+                
+                if not trade:
+                    return None
+                
+                # 应用更新
+                for key, value in updates.items():
+                    if hasattr(trade, key):
+                        setattr(trade, key, value)
+                trade.updated_at = _utcnow()
+                
+                await session.flush()
+                return {c.name: getattr(trade, c.name) for c in trade.__table__.columns}
+
+    @staticmethod
     async def close_trade(
         trade_id: str,
         pnl: float,
@@ -109,26 +139,83 @@ class TradeRepository:
         exit_ref_price: float = 0.0,
         exit_slippage_pct: float = 0.0,
     ) -> bool:
-        """平仓"""
+        """
+        平仓 - 使用行级锁防止并发冲突
+        """
         db = await get_db()
         async with db.session() as session:
-            await session.execute(
-                update(TradeModel)
-                .where(TradeModel.id == trade_id)
-                .values(
-                    status="closed",
-                    pnl=pnl,
-                    current_price=close_price,
-                    close_reason=close_reason,
-                    close_type=close_type,
-                    close_order_id=close_order_id,
-                    exit_ref_price=exit_ref_price,
-                    exit_slippage_pct=exit_slippage_pct,
-                    closed_at=_utcnow(),
-                    updated_at=_utcnow(),
+            async with session.begin():
+                # 使用行级锁
+                result = await session.execute(
+                    select(TradeModel)
+                    .where(TradeModel.id == trade_id)
+                    .where(TradeModel.status == "open")  # 只处理未平仓的
+                    .with_for_update()
                 )
-            )
-            return True
+                trade = result.scalar_one_or_none()
+                
+                if not trade:
+                    return False
+                
+                # 更新状态
+                trade.status = "closed"
+                trade.pnl = pnl
+                trade.current_price = close_price
+                trade.close_reason = close_reason
+                trade.close_type = close_type
+                trade.close_order_id = close_order_id
+                trade.exit_ref_price = exit_ref_price
+                trade.exit_slippage_pct = exit_slippage_pct
+                trade.closed_at = _utcnow()
+                trade.updated_at = _utcnow()
+                
+                await session.flush()
+                return True
+
+    @staticmethod
+    async def trigger_tp1_with_lock(
+        trade_id: str,
+        tp1_price: float,
+        tp1_close_order_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        触发止盈1 - 使用行级锁
+        
+        返回更新后的交易数据，如果已经触发过则返回 None
+        """
+        db = await get_db()
+        async with db.session() as session:
+            async with session.begin():
+                # 使用行级锁
+                result = await session.execute(
+                    select(TradeModel)
+                    .where(TradeModel.id == trade_id)
+                    .where(TradeModel.status == "open")
+                    .where(TradeModel.tp1_triggered == False)  # 只处理未触发的
+                    .with_for_update()
+                )
+                trade = result.scalar_one_or_none()
+                
+                if not trade:
+                    return None
+                
+                # 计算止盈
+                close_ratio = 0.5  # 平仓比例
+                closed_shares = trade.shares * close_ratio
+                locked_pnl = closed_shares * (tp1_price - trade.entry_price)
+                
+                if trade.direction == "SHORT":
+                    locked_pnl = -locked_pnl  # 做空盈亏相反
+                
+                # 更新状态
+                trade.tp1_triggered = True
+                trade.tp1_locked_pnl = locked_pnl
+                trade.tp1_close_order_id = tp1_close_order_id
+                trade.stake_remaining = trade.stake * (1 - close_ratio)
+                trade.updated_at = _utcnow()
+                
+                await session.flush()
+                return {c.name: getattr(trade, c.name) for c in trade.__table__.columns}
 
     @staticmethod
     async def get_total_open_stake(account_id: Optional[str] = None) -> float:
@@ -370,6 +457,43 @@ class RiskRepository:
                 .values(**updates)
             )
             return True
+
+    @staticmethod
+    async def update_with_lock(account_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        带行级锁的更新 - 防止并发冲突
+        """
+        today = _today_str()
+        db = await get_db()
+        async with db.session() as session:
+            async with session.begin():
+                # 使用行级锁
+                result = await session.execute(
+                    select(RiskStateModel)
+                    .where(
+                        and_(
+                            RiskStateModel.account_id == account_id,
+                            RiskStateModel.date == today,
+                        )
+                    )
+                    .with_for_update()
+                )
+                state = result.scalar_one_or_none()
+                
+                if not state:
+                    # 不存在则创建
+                    state = RiskStateModel(account_id=account_id, date=today)
+                    session.add(state)
+                    await session.flush()
+                
+                # 应用更新
+                for key, value in updates.items():
+                    if hasattr(state, key):
+                        setattr(state, key, value)
+                state.updated_at = _utcnow()
+                
+                await session.flush()
+                return {c.name: getattr(state, c.name) for c in state.__table__.columns}
 
     @staticmethod
     async def increment_daily_trades(account_id: str) -> int:

@@ -1,6 +1,6 @@
 """
 异步风控服务
-基于数据库行级锁的实时风控
+事件驱动 + 行级锁，毫秒级响应
 """
 
 import asyncio
@@ -17,23 +17,34 @@ logger = logging.getLogger("nexus.risk")
 
 class RiskControlService:
     """
-    风控服务
+    风控服务 - 事件驱动模式
     
-    职责:
-    - 账户级风控
-    - 组合级风控
-    - 策略级风控
-    - 实时监控和告警
+    设计原则：
+    1. 主动风控：订阅信号/订单事件，毫秒级拦截
+    2. 被动风控：定时轮询作为兜底
+    3. 行级锁：所有状态更新使用数据库行级锁
     """
     
     def __init__(self):
         self.settings = get_settings()
         self._running = False
+        
+        # 事件订阅 ID
+        self._subscriptions: List[str] = []
+        
+        # 被动监控任务
         self._monitor_task: Optional[asyncio.Task] = None
         
-        # 风控状态缓存
-        self._risk_states: Dict[str, Dict[str, Any]] = {}
+        # 风控状态缓存（内存快速访问）
+        self._risk_cache: Dict[str, Dict[str, Any]] = {}
         self._paused_until: Dict[str, datetime] = {}
+        
+        # 统计
+        self._stats = {
+            "checks_total": 0,
+            "blocks_total": 0,
+            "last_check": None,
+        }
     
     async def start(self) -> None:
         """启动风控服务"""
@@ -41,13 +52,26 @@ class RiskControlService:
             return
         
         self._running = True
+        
+        # 注册事件监听（主动风控）
+        await self._register_event_listeners()
+        
+        # 启动被动监控（兜底）
         self._monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("RiskControlService started")
+        
+        logger.info("RiskControlService started (event-driven mode)")
     
     async def stop(self) -> None:
         """停止风控服务"""
         self._running = False
         
+        # 取消事件订阅
+        bus = await get_event_bus()
+        for sub_id in self._subscriptions:
+            await bus.unsubscribe(sub_id)
+        self._subscriptions.clear()
+        
+        # 停止被动监控
         if self._monitor_task:
             self._monitor_task.cancel()
             try:
@@ -57,11 +81,122 @@ class RiskControlService:
         
         logger.info("RiskControlService stopped")
     
+    async def _register_event_listeners(self) -> None:
+        """注册事件监听 - 实现主动风控"""
+        bus = await get_event_bus()
+        
+        # 监听信号生成事件 - 预审
+        sub_id = await bus.subscribe(
+            EventType.SIGNAL_TRIGGERED,
+            self._on_signal_triggered,
+            "risk_signal_precheck"
+        )
+        self._subscriptions.append(sub_id)
+        
+        # 监听订单成交事件 - 更新风控状态
+        sub_id = await bus.subscribe(
+            EventType.EXECUTION_ORDER_FILLED,
+            self._on_order_filled,
+            "risk_order_filled"
+        )
+        self._subscriptions.append(sub_id)
+        
+        # 监听订单失败事件
+        sub_id = await bus.subscribe(
+            EventType.EXECUTION_ORDER_FAILED,
+            self._on_order_failed,
+            "risk_order_failed"
+        )
+        self._subscriptions.append(sub_id)
+        
+        # 监听平仓事件
+        sub_id = await bus.subscribe(
+            EventType.TRADE_CLOSED,
+            self._on_trade_closed,
+            "risk_trade_closed"
+        )
+        self._subscriptions.append(sub_id)
+        
+        logger.info("Risk event listeners registered")
+    
+    async def _on_signal_triggered(self, event) -> None:
+        """
+        信号预审 - 毫秒级风控拦截
+        
+        在信号产生的瞬间进行风控检查，如果不通过则阻止开仓
+        """
+        signal_data = event.data
+        symbol = signal_data.get("symbol", "")
+        account_id = signal_data.get("account_id", "default")
+        stake = signal_data.get("stake", self.settings.risk.default_stake)
+        direction = signal_data.get("direction", "SHORT")
+        
+        self._stats["checks_total"] += 1
+        
+        # 快速风控检查
+        can_open, reason = await self.check_can_open(
+            account_id=account_id,
+            symbol=symbol,
+            direction=direction,
+            stake=stake,
+        )
+        
+        if not can_open:
+            self._stats["blocks_total"] += 1
+            logger.warning(f"Risk BLOCKED signal: {symbol} - {reason}")
+            
+            # 发布风控阻止事件
+            bus = await get_event_bus()
+            await bus.publish(EventType.RISK_ALERT, {
+                "alert_type": "signal_blocked",
+                "symbol": symbol,
+                "reason": reason,
+                "account_id": account_id,
+            })
+            
+            # 修改信号数据，标记为被风控阻止
+            signal_data["risk_blocked"] = True
+            signal_data["risk_block_reason"] = reason
+    
+    async def _on_order_filled(self, event) -> None:
+        """订单成交 - 更新风控状态"""
+        order_data = event.data
+        account_id = order_data.get("account_id", "default")
+        
+        # 更新今日开仓数
+        await RiskRepository.increment_daily_trades(account_id)
+        
+        # 更新缓存
+        if account_id in self._risk_cache:
+            self._risk_cache[account_id]["daily_trades_opened"] = \
+                self._risk_cache[account_id].get("daily_trades_opened", 0) + 1
+        
+        logger.info(f"Risk updated: order filled for {account_id}")
+    
+    async def _on_order_failed(self, event) -> None:
+        """订单失败 - 记录但不影响风控状态"""
+        order_data = event.data
+        logger.warning(f"Order failed: {order_data}")
+    
+    async def _on_trade_closed(self, event) -> None:
+        """平仓 - 更新风控状态"""
+        trade_data = event.data
+        account_id = trade_data.get("account_id", "default")
+        pnl = trade_data.get("pnl", 0)
+        trade_id = trade_data.get("trade_id", "")
+        
+        # 记录盈亏
+        if pnl < 0:
+            await self.record_trade_closed(account_id, trade_id, pnl)
+        
+        logger.info(f"Risk updated: trade closed pnl={pnl}")
+    
     async def _monitor_loop(self) -> None:
-        """监控循环"""
+        """被动监控循环 - 作为兜底"""
         while self._running:
             try:
                 await self._check_all_accounts()
+                self._stats["last_check"] = datetime.now(timezone.utc).isoformat()
                 await asyncio.sleep(60)  # 每分钟检查一次
             except asyncio.CancelledError:
                 break
@@ -71,8 +206,6 @@ class RiskControlService:
     
     async def _check_all_accounts(self) -> None:
         """检查所有账户的风控状态"""
-        bus = await get_event_bus()
-        
         # 获取所有持仓
         open_trades = await TradeRepository.get_open()
         
@@ -139,34 +272,13 @@ class RiskControlService:
             )
             return
         
-        # 检查今日开仓数
-        today_trades = await TradeRepository.get_today_trades_count(account_id)
-        if today_trades >= risk_config.max_daily_trades:
-            logger.warning(
-                f"Account {account_id} daily trades limit: {today_trades}"
-            )
-            return
-        
-        # 检查持仓集中度
-        total_stake = sum(t.get("stake_remaining", 0) for t in open_trades)
-        if total_stake > risk_config.max_stake:
-            logger.warning(
-                f"Account {account_id} total stake too high: {total_stake}"
-            )
-            await bus.publish(EventType.RISK_ALERT, {
-                "alert_type": "high_stake",
-                "account_id": account_id,
-                "total_stake": total_stake,
-                "limit": risk_config.max_stake,
-            })
-        
-        # 更新风控状态
-        await RiskRepository.update(account_id, {
+        # 更新缓存
+        self._risk_cache[account_id] = {
             "daily_loss": daily_loss,
-            "daily_trades_opened": today_trades,
             "consecutive_losses": consecutive_losses,
-            "total_open_stake": total_stake,
-        })
+            "daily_trades_opened": risk_state.get("daily_trades_opened", 0),
+            "total_open_stake": sum(t.get("stake_remaining", 0) for t in open_trades),
+        }
     
     async def check_can_open(
         self,
@@ -190,39 +302,38 @@ class RiskControlService:
             else:
                 del self._paused_until[account_id]
         
+        # 优先使用缓存（快速路径）
+        cached = self._risk_cache.get(account_id, {})
+        
         # 检查日亏损
-        daily_loss = await TradeRepository.get_today_realized_loss(account_id)
+        daily_loss = cached.get("daily_loss") or await TradeRepository.get_today_realized_loss(account_id)
         if daily_loss >= risk_config.max_daily_loss:
             return False, f"Daily loss limit reached: {daily_loss}"
         
         # 检查连续亏损
-        consecutive_losses = await TradeRepository.get_consecutive_losses(account_id)
+        consecutive_losses = cached.get("consecutive_losses") or await TradeRepository.get_consecutive_losses(account_id)
         if consecutive_losses >= risk_config.consecutive_loss_pause:
             return False, f"Consecutive losses: {consecutive_losses}"
         
         # 检查今日开仓数
-        today_trades = await TradeRepository.get_today_trades_count(account_id)
+        today_trades = cached.get("daily_trades_opened") or await TradeRepository.get_today_trades_count(account_id)
         if today_trades >= risk_config.max_daily_trades:
             return False, f"Daily trades limit: {today_trades}"
         
         # 检查方向限制
         if direction == "SHORT":
-            short_count = len([
-                t for t in await TradeRepository.get_open(account_id)
-                if t.get("direction") == "SHORT"
-            ])
+            open_trades = await TradeRepository.get_open(account_id)
+            short_count = len([t for t in open_trades if t.get("direction") == "SHORT"])
             if short_count >= risk_config.max_daily_trades_short:
                 return False, f"Short trades limit: {short_count}"
         elif direction == "LONG":
-            long_count = len([
-                t for t in await TradeRepository.get_open(account_id)
-                if t.get("direction") == "LONG"
-            ])
+            open_trades = await TradeRepository.get_open(account_id)
+            long_count = len([t for t in open_trades if t.get("direction") == "LONG"])
             if long_count >= risk_config.max_daily_trades_long:
                 return False, f"Long trades limit: {long_count}"
         
         # 检查持仓总额
-        total_stake = await TradeRepository.get_total_open_stake(account_id)
+        total_stake = cached.get("total_open_stake") or await TradeRepository.get_total_open_stake(account_id)
         if total_stake + stake > risk_config.max_stake:
             return False, f"Total stake would exceed limit: {total_stake + stake}"
         
@@ -232,21 +343,6 @@ class RiskControlService:
         if symbol_trades:
             return False, f"Already have position in {symbol}"
         
-        # 检查冷却期
-        if risk_config.cooldown_scope == "symbol":
-            recent_closed = [
-                t for t in await TradeRepository.get_open(account_id)
-                if t.get("symbol") == symbol and t.get("status") == "closed"
-            ]
-            if recent_closed:
-                last_close = max(t.get("closed_at", datetime.min) for t in recent_closed)
-                if isinstance(last_close, str):
-                    from datetime import datetime as dt
-                    last_close = dt.fromisoformat(last_close.replace("Z", "+00:00"))
-                cooldown_until = last_close + timedelta(hours=risk_config.cooldown_hours)
-                if datetime.now(timezone.utc) < cooldown_until:
-                    return False, f"Cooldown period for {symbol}"
-        
         return True, "OK"
     
     async def record_trade_closed(
@@ -255,16 +351,24 @@ class RiskControlService:
         trade_id: str,
         pnl: float,
     ) -> None:
-        """记录平仓"""
-        # 累加日亏损
+        """记录平仓 - 使用行级锁"""
+        # 累加日亏损（使用行级锁）
         if pnl < 0:
-            await RiskRepository.add_daily_loss(account_id, abs(pnl))
+            await RiskRepository.update_with_lock(account_id, {
+                "daily_loss": RiskRepository.increment_daily_loss,
+            })
         
         # 更新连续亏损
         consecutive_losses = await TradeRepository.get_consecutive_losses(account_id)
-        await RiskRepository.update(account_id, {
+        await RiskRepository.update_with_lock(account_id, {
             "consecutive_losses": consecutive_losses,
         })
+        
+        # 更新缓存
+        if account_id in self._risk_cache:
+            self._risk_cache[account_id]["daily_loss"] = \
+                self._risk_cache[account_id].get("daily_loss", 0) + abs(pnl) if pnl < 0 else 0
+            self._risk_cache[account_id]["consecutive_losses"] = consecutive_losses
         
         # 发布事件
         bus = await get_event_bus()
@@ -299,12 +403,16 @@ class RiskControlService:
             "daily_trades_limit": risk_config.max_daily_trades,
             "total_stake": total_stake,
             "max_stake": risk_config.max_stake,
+            "stats": self._stats,
         }
     
     async def health_check(self) -> Dict[str, Any]:
         """健康检查"""
         return {
             "running": self._running,
+            "mode": "event-driven",
+            "subscriptions": len(self._subscriptions),
             "monitor_task": self._monitor_task is not None and not self._monitor_task.done(),
             "paused_accounts": list(self._paused_until.keys()),
+            "stats": self._stats,
         }
