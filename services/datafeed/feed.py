@@ -185,13 +185,12 @@ class DataFeedService:
         limit: int = 100,
         exchange: str = "binance",
     ) -> Optional[List[List]]:
-        """获取K线数据"""
+        """获取K线数据（带缓存和并发保护）"""
         cache_key = f"{exchange}:{symbol}:{timeframe}:ohlcv"
         
-        # 检查缓存（K线数据缓存更久）
+        # TTLCache 自动处理过期，直接检查即可
         if cache_key in self._cache:
-            if time.time() - self._cache_ttl.get(cache_key, 0) < 60:
-                return self._cache[cache_key]
+            return self._cache[cache_key]
         
         if exchange not in self._exchanges:
             logger.warning(f"Exchange {exchange} not available")
@@ -202,9 +201,8 @@ class DataFeedService:
                 symbol, timeframe, limit=limit
             )
             
-            # 更新缓存
+            # 写入 TTLCache（自动管理过期）
             self._cache[cache_key] = ohlcv
-            self._cache_ttl[cache_key] = time.time()
             
             return ohlcv
         except Exception as e:
@@ -440,7 +438,7 @@ class DataFeedService:
             except Exception:
                 continue
         
-        return best_exchange or self.settings.exchange.primary_exchange
+        return best_exchange or self._settings.exchange.primary_exchange
     
     async def get_multi_exchange_price(
         self,

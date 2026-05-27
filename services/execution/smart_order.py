@@ -298,6 +298,9 @@ class SmartOrderEngine:
         
         根据市场成交量动态调整执行速度
         """
+        if not self.exchange:
+            return SmartOrderResult(order_id=order_id, algo=OrderAlgo.VWAP, status="no_exchange")
+        
         max_duration = config.vwap_max_duration_sec
         participation_rate = config.vwap_participation_rate
         
@@ -313,33 +316,32 @@ class SmartOrderEngine:
                 break
             
             try:
-                    # 获取当前成交量 (24小时成交量 / 1440分钟)
-                    if self.exchange:
-                        ticker = await self.exchange.fetch_ticker(symbol)
-                        vol_24h = ticker.get("baseVolume", 0)
-                        vol_1m = vol_24h / (24 * 60)  # 修正：24小时 / 1440分钟
-                    
-                    # 计算本次执行量
-                    target_amount = vol_1m * participation_rate
-                    remaining = amount - filled_amount
-                    chunk = min(target_amount, remaining)
-                    
-                    if chunk > 0:
-                        order = await self.exchange.create_order(
-                            symbol=symbol,
-                            type="market",
-                            side=side,
-                            amount=chunk,
-                        )
-                        
-                        fill_price = order.get("average", order.get("price", price))
-                        fill_amount = order.get("filled", chunk)
-                        
-                        filled_amount += fill_amount
-                        total_cost += fill_amount * fill_price
-                        filled_orders += 1
+                # 获取当前成交量 (24小时成交量 / 1440分钟)
+                ticker = await self.exchange.fetch_ticker(symbol)
+                vol_24h = ticker.get("baseVolume", 0)
+                vol_1m = vol_24h / (24 * 60)
                 
-                await asyncio.sleep(5)  # 每 5 秒检查一次
+                # 计算本次执行量
+                target_amount = vol_1m * participation_rate
+                remaining = amount - filled_amount
+                chunk = min(target_amount, remaining)
+                
+                if chunk > 0:
+                    order = await self.exchange.create_order(
+                        symbol=symbol,
+                        type="market",
+                        side=side,
+                        amount=chunk,
+                    )
+                    
+                    fill_price = order.get("average", order.get("price", price))
+                    filled = order.get("filled", chunk)
+                    
+                    filled_amount += filled
+                    total_cost += filled * fill_price
+                    filled_orders += 1
+                
+                await asyncio.sleep(5)
             
             except Exception as e:
                 logger.warning(f"VWAP execution error: {e}")

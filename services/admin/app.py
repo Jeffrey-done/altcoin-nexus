@@ -134,12 +134,16 @@ def create_app() -> FastAPI:
     async def get_trades(
         status: Optional[str] = None,
         account_id: Optional[str] = None,
+        user: str = Depends(get_current_user),  # 需要认证
     ):
         trades = await TradeRepository.get_open(account_id=account_id)
         return [TradeResponse(**t) for t in trades]
     
     @app.get("/api/trades/{trade_id}")
-    async def get_trade(trade_id: str):
+    async def get_trade(
+        trade_id: str,
+        user: str = Depends(get_current_user),  # 需要认证
+    ):
         trade = await TradeRepository.get_by_id(trade_id)
         if not trade:
             raise HTTPException(status_code=404, detail="Trade not found")
@@ -150,6 +154,7 @@ def create_app() -> FastAPI:
     async def get_candidates(
         strategy: Optional[str] = None,
         direction: Optional[str] = None,
+        user: str = Depends(get_current_user),  # 需要认证
     ):
         candidates = await CandidateRepository.get_active(
             strategy=strategy,
@@ -159,7 +164,10 @@ def create_app() -> FastAPI:
     
     # 风控状态
     @app.get("/api/risk/{account_id}", response_model=RiskStatusResponse)
-    async def get_risk_status(account_id: str):
+    async def get_risk_status(
+        account_id: str,
+        user: str = Depends(get_current_user),  # 需要认证
+    ):
         from services.risk import RiskControlService
         # 这里需要获取风控服务实例
         # 简化实现
@@ -179,6 +187,7 @@ def create_app() -> FastAPI:
         event_type: Optional[str] = None,
         symbol: Optional[str] = None,
         limit: int = 50,
+        user: str = Depends(get_current_user),  # 需要认证
     ):
         events = await EventRepository.get_recent(
             event_type=event_type,
@@ -189,7 +198,7 @@ def create_app() -> FastAPI:
     
     # 系统状态
     @app.get("/api/system/status")
-    async def get_system_status():
+    async def get_system_status(user: str = Depends(get_current_user)):  # 需要认证
         return {
             "version": settings.version,
             "environment": settings.environment,
