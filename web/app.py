@@ -804,6 +804,36 @@ def create_app() -> FastAPI:
         events = await EventRepository.get_recent(event_type=event_type, limit=limit)
         return {"events": events}
 
+    @app.get("/api/system/validation")
+    async def system_validation(user: str = Depends(require_auth)):
+        """事件闭环验证"""
+        from services.monitor.validator import get_validator
+        validator = await get_validator()
+        result = validator.validate()
+        return {
+            "timestamp": result.timestamp,
+            "is_healthy": result.is_healthy,
+            "health_score": result.health_score,
+            "chains": {
+                "total": result.total_chains,
+                "completed": result.completed_chains,
+                "timeout": result.timeout_chains,
+                "failed": result.failed_chains,
+            },
+            "latency": {
+                "avg_risk_ms": result.avg_risk_latency_ms,
+                "avg_execution_ms": result.avg_execution_latency_ms,
+                "avg_total_ms": result.avg_total_latency_ms,
+            },
+        }
+
+    @app.get("/api/config/manager")
+    async def config_manager_status(user: str = Depends(require_auth)):
+        """配置管理器状态"""
+        from core.config.manager import get_config_manager
+        manager = await get_config_manager()
+        return manager.get_status()
+
     # ==================== 优化路由 ====================
 
     @app.post("/api/optimization/run")
@@ -826,6 +856,30 @@ def create_app() -> FastAPI:
             return {"history": history}
         except Exception:
             return {"history": []}
+
+    # ==================== 回测路由 ====================
+
+    @app.post("/api/backtesting/monte-carlo")
+    async def run_monte_carlo(user: str = Depends(require_auth)):
+        """运行蒙特卡洛稳健性测试"""
+        from backtesting.monte_carlo import MonteCarloSimulator
+        from core.db import TradeRepository
+        trades = await TradeRepository.get_closed(limit=1000)
+        
+        simulator = MonteCarloSimulator(n_simulations=1000)
+        result = simulator.simulate(trades)
+        
+        return {
+            "robustness_score": result.robustness_score,
+            "is_robust": result.is_robust(),
+            "mean_return": result.mean_return,
+            "max_drawdown_mean": result.max_drawdown_mean,
+            "win_rate_mean": result.win_rate_mean,
+            "profit_factor_mean": result.profit_factor_mean,
+            "var_95": result.var_95,
+            "percentile_5": result.percentile_5,
+            "percentile_95": result.percentile_95,
+        }
 
     # ==================== WebSocket ====================
 

@@ -48,6 +48,8 @@ const nav = [
   { path: '/risk', icon: '🛡️', label: '风控状态' },
   { path: '/config', icon: '⚙️', label: '策略配置' },
   { path: '/secrets', icon: '🔑', label: '密钥管理' },
+  { path: '/optimization', icon: '⚡', label: '参数优化' },
+  { path: '/backtesting', icon: '🧪', label: '稳健性回测' },
   { path: '/system', icon: '🖥️', label: '系统监控' },
   { path: '/account', icon: '👤', label: '账号安全' },
 ]

@@ -105,12 +105,19 @@ export const systemApi = {
     api.post('/system/circuit-breaker/reset', { exchange }),
   recover: () => api.post('/system/recover'),
   events: (params?: any) => api.get('/system/events', { params }),
+  validation: () => api.get('/system/validation'),
+  configManager: () => api.get('/config/manager'),
 }
 
 // === Optimization ===
 export const optimizationApi = {
   run: () => api.post('/optimization/run'),
   history: () => api.get('/optimization/history'),
+}
+
+// === Backtesting ===
+export const backtestingApi = {
+  monteCarlo: () => api.post('/backtesting/monte-carlo'),
 }
 
 export default api

@@ -3,7 +3,7 @@
     <h2 class="text-xl font-bold">系统监控</h2>
 
     <!-- 系统状态 -->
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
       <div class="card">
         <p class="text-xs text-gray-400">系统状态</p>
         <div class="flex items-center gap-2 mt-2">
@@ -11,6 +11,16 @@
           <span class="text-emerald-400 font-medium">运行中</span>
         </div>
         <p class="text-xs text-gray-500 mt-1">v{{ health.version }} / {{ health.environment }}</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-400">事件闭环验证</p>
+        <div class="flex items-center gap-2 mt-2">
+          <span class="w-3 h-3 rounded-full" :class="validation?.is_healthy ? 'bg-emerald-400' : 'bg-red-400'"></span>
+          <span :class="validation?.is_healthy ? 'text-emerald-400' : 'text-red-400'" class="font-medium">
+            得分: {{ (validation?.health_score * 100)?.toFixed(1) }}%
+          </span>
+        </div>
+        <p class="text-xs text-gray-500 mt-1">完成: {{ validation?.chains?.completed || 0 }} / 失败: {{ validation?.chains?.failed || 0 }}</p>
       </div>
       <div class="card">
         <p class="text-xs text-gray-400">对账状态</p>
@@ -75,6 +85,7 @@ import { systemApi } from '@/api'
 const health = ref<any>({})
 const recon = ref<any>({})
 const events = ref<any[]>([])
+const validation = ref<any>(null)
 
 const breakers = computed(() => recon.value.circuit_breakers || {})
 const hasOpen = computed(() => Object.values(breakers.value).some((b: any) => b.state !== 'closed'))
@@ -97,6 +108,7 @@ function fmtTime(ts: string) {
 async function load() {
   health.value = await systemApi.health()
   recon.value = await systemApi.reconciliation()
+  validation.value = await systemApi.validation()
   const res: any = await systemApi.events({ limit: 30 })
   events.value = res.events || []
 }

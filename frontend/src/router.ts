@@ -13,6 +13,8 @@ const router = createRouter({
     { path: '/secrets', name: 'secrets', component: () => import('@/views/Secrets.vue'), meta: { auth: true } },
     { path: '/system', name: 'system', component: () => import('@/views/System.vue'), meta: { auth: true } },
     { path: '/account', name: 'account', component: () => import('@/views/Account.vue'), meta: { auth: true } },
+    { path: '/optimization', name: 'optimization', component: () => import('@/views/Optimization.vue'), meta: { auth: true } },
+    { path: '/backtesting', name: 'backtesting', component: () => import('@/views/Backtesting.vue'), meta: { auth: true } },
   ],
 })
 

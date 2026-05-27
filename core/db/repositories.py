@@ -75,6 +75,27 @@ class TradeRepository:
             return [{c.name: getattr(t, c.name) for c in t.__table__.columns} for t in trades]
 
     @staticmethod
+    async def get_closed(
+        account_id: Optional[str] = None,
+        exchange: Optional[str] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """获取已平仓交易"""
+        db = await get_db()
+        async with db.session() as session:
+            query = select(TradeModel).where(TradeModel.status == "closed").order_by(desc(TradeModel.closed_at))
+            if account_id:
+                query = query.where(TradeModel.account_id == account_id)
+            if exchange:
+                query = query.where(TradeModel.exchange == exchange)
+            if limit > 0:
+                query = query.limit(limit)
+            
+            result = await session.execute(query)
+            trades = result.scalars().all()
+            return [{c.name: getattr(t, c.name) for c in t.__table__.columns} for t in trades]
+
+    @staticmethod
     async def get_open_symbols(account_id: Optional[str] = None) -> set:
         """获取当前持仓的symbol集合"""
         db = await get_db()
