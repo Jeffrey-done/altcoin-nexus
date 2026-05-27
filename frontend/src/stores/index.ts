@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { authApi, dashboardApi, tradeApi, candidateApi, riskApi, configApi, secretsApi, signalApi } from '@/api'
+import { authApi, dashboardApi, tradeApi, candidateApi, riskApi, configApi, secretsApi, signalApi, accountsApi } from '@/api'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('nexus_token') || '')
@@ -84,12 +84,15 @@ export const useRiskStore = defineStore('risk', () => {
 
 export const useConfigStore = defineStore('config', () => {
   const config = ref<any>({})
-  const secrets = ref<any>({})
+  const accounts = ref<any[]>([])
   const telegram = ref<any>({})
   async function fetchConfig() { config.value = await configApi.getAll() }
-  async function fetchSecrets() { secrets.value = await secretsApi.exchanges() }
+  async function fetchAccounts(exchange?: string) {
+    const res: any = await accountsApi.list(exchange)
+    accounts.value = res.accounts || []
+  }
   async function fetchTelegram() { telegram.value = await secretsApi.telegram() }
-  return { config, secrets, telegram, fetchConfig, fetchSecrets, fetchTelegram }
+  return { config, accounts, telegram, fetchConfig, fetchAccounts, fetchTelegram }
 })
 
 export const useSignalStore = defineStore('signal', () => {

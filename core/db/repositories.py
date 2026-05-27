@@ -730,3 +730,175 @@ class SystemStateRepository:
             result = await session.execute(select(SystemStateModel))
             states = result.scalars().all()
             return {s.key: s.value for s in states}
+
+
+
+class ExchangeAccountRepository:
+    """
+    交易所账户 Repository - 多账户CRUD
+    
+    支持同一交易所配置多个独立API Key
+    """
+
+    @staticmethod
+    async def create(account_data: Dict[str, Any]) -> Dict[str, Any]:
+        """创建新账户"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            account = ExchangeAccountModel(**account_data)
+            session.add(account)
+            await session.flush()
+            await session.refresh(account)
+            return {c.name: getattr(account, c.name) for c in account.__table__.columns}
+
+    @staticmethod
+    async def get_by_id(account_id: str) -> Optional[Dict[str, Any]]:
+        """按 account_id 获取账户"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                select(ExchangeAccountModel).where(
+                    ExchangeAccountModel.account_id == account_id
+                )
+            )
+            account = result.scalar_one_or_none()
+            if account:
+                return {c.name: getattr(account, c.name) for c in account.__table__.columns}
+            return None
+
+    @staticmethod
+    async def get_all(
+        exchange: Optional[str] = None,
+        is_active: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
+        """获取所有账户（可按交易所/状态过滤）"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            query = select(ExchangeAccountModel)
+            if exchange:
+                query = query.where(ExchangeAccountModel.exchange == exchange)
+            if is_active is not None:
+                query = query.where(ExchangeAccountModel.is_active == is_active)
+            query = query.order_by(ExchangeAccountModel.exchange, ExchangeAccountModel.created_at)
+            result = await session.execute(query)
+            accounts = result.scalars().all()
+            return [{c.name: getattr(a, c.name) for c in a.__table__.columns} for a in accounts]
+
+    @staticmethod
+    async def update(account_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """更新账户信息"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                select(ExchangeAccountModel).where(
+                    ExchangeAccountModel.account_id == account_id
+                )
+            )
+            account = result.scalar_one_or_none()
+            if not account:
+                return None
+            for key, value in updates.items():
+                if hasattr(account, key) and key not in ("id", "account_id", "created_at"):
+                    setattr(account, key, value)
+            account.updated_at = datetime.now(timezone.utc)
+            await session.flush()
+            return {c.name: getattr(account, c.name) for c in account.__table__.columns}
+
+    @staticmethod
+    async def delete(account_id: str) -> bool:
+        """删除账户"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                delete(ExchangeAccountModel).where(
+                    ExchangeAccountModel.account_id == account_id
+                )
+            )
+            return result.rowcount > 0
+
+    @staticmethod
+    async def get_primary(exchange: str) -> Optional[Dict[str, Any]]:
+        """获取指定交易所的主账户"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                select(ExchangeAccountModel).where(
+                    and_(
+                        ExchangeAccountModel.exchange == exchange,
+                        ExchangeAccountModel.is_primary == True,
+                        ExchangeAccountModel.is_active == True,
+                    )
+                )
+            )
+            account = result.scalar_one_or_none()
+            if account:
+                return {c.name: getattr(account, c.name) for c in account.__table__.columns}
+            # 如果没有主账户，返回该交易所第一个活跃账户
+            result = await session.execute(
+                select(ExchangeAccountModel).where(
+                    and_(
+                        ExchangeAccountModel.exchange == exchange,
+                        ExchangeAccountModel.is_active == True,
+                    )
+                ).limit(1)
+            )
+            account = result.scalar_one_or_none()
+            if account:
+                return {c.name: getattr(account, c.name) for c in account.__table__.columns}
+            return None
+
+    @staticmethod
+    async def set_primary(account_id: str) -> bool:
+        """将指定账户设为主账户（同时取消同交易所其他主账户）"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            # 先获取该账户的交易所
+            result = await session.execute(
+                select(ExchangeAccountModel).where(
+                    ExchangeAccountModel.account_id == account_id
+                )
+            )
+            account = result.scalar_one_or_none()
+            if not account:
+                return False
+            exchange = account.exchange
+            # 取消该交易所所有主账户标记
+            await session.execute(
+                update(ExchangeAccountModel)
+                .where(ExchangeAccountModel.exchange == exchange)
+                .values(is_primary=False)
+            )
+            # 设置新的主账户
+            account.is_primary = True
+            account.updated_at = datetime.now(timezone.utc)
+            await session.flush()
+            return True
+
+    @staticmethod
+    async def get_active_by_exchange() -> Dict[str, List[Dict[str, Any]]]:
+        """按交易所分组获取所有活跃账户"""
+        from .models import ExchangeAccountModel
+        db = await get_db()
+        async with db.session() as session:
+            result = await session.execute(
+                select(ExchangeAccountModel)
+                .where(ExchangeAccountModel.is_active == True)
+                .order_by(ExchangeAccountModel.exchange, ExchangeAccountModel.is_primary.desc())
+            )
+            accounts = result.scalars().all()
+            grouped: Dict[str, List[Dict[str, Any]]] = {}
+            for a in accounts:
+                ex = a.exchange
+                if ex not in grouped:
+                    grouped[ex] = []
+                grouped[ex].append(
+                    {c.name: getattr(a, c.name) for c in a.__table__.columns}
+                )
+            return grouped

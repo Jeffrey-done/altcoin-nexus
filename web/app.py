@@ -460,75 +460,180 @@ def create_app() -> FastAPI:
         return {"status": "ok", "key": f"{body.section}.{body.key}", "value": value}
 
 
-    # ==================== 密钥管理路由 ====================
+    # ==================== 密钥管理路由 (多账户) ====================
 
-    @app.get("/api/secrets/exchanges")
-    async def get_exchange_secrets(user: str = Depends(require_auth)):
-        """获取交易所密钥状态 (仅显示是否已配置，不返回明文)"""
-        from core.config import get_settings
-        s = get_settings()
-        return {
-            "binance": {
-                "api_key_set": bool(s.exchange.binance_api_key),
-                "api_secret_set": bool(s.exchange.binance_api_secret),
-                "api_key_masked": _mask_key(s.exchange.binance_api_key),
-            },
-            "okx": {
-                "api_key_set": bool(s.exchange.okx_api_key),
-                "api_secret_set": bool(s.exchange.okx_api_secret),
-                "passphrase_set": bool(s.exchange.okx_passphrase),
-                "api_key_masked": _mask_key(s.exchange.okx_api_key),
-            },
-            "bybit": {
-                "api_key_set": bool(s.exchange.bybit_api_key),
-                "api_secret_set": bool(s.exchange.bybit_api_secret),
-                "api_key_masked": _mask_key(s.exchange.bybit_api_key),
-            },
-            "gate": {
-                "api_key_set": bool(s.exchange.gate_api_key),
-                "api_secret_set": bool(s.exchange.gate_api_secret),
-                "api_key_masked": _mask_key(s.exchange.gate_api_key),
-            },
-            "bitget": {
-                "api_key_set": bool(s.exchange.bitget_api_key),
-                "api_secret_set": bool(s.exchange.bitget_api_secret),
-                "passphrase_set": bool(s.exchange.bitget_passphrase),
-                "api_key_masked": _mask_key(s.exchange.bitget_api_key),
-            },
+    @app.get("/api/accounts")
+    async def list_accounts(
+        exchange: Optional[str] = None,
+        user: str = Depends(require_auth),
+    ):
+        """获取所有交易所账户列表（密钥脱敏）"""
+        from core.db import ExchangeAccountRepository
+        accounts = await ExchangeAccountRepository.get_all(exchange=exchange)
+        # 脱敏：不返回明文密钥
+        safe_accounts = []
+        for a in accounts:
+            safe_accounts.append({
+                "id": a["id"],
+                "account_id": a["account_id"],
+                "label": a["label"],
+                "exchange": a["exchange"],
+                "api_key_masked": _mask_key(a.get("api_key", "")),
+                "has_secret": bool(a.get("api_secret")),
+                "has_passphrase": bool(a.get("passphrase")),
+                "leverage": a["leverage"],
+                "position_mode": a["position_mode"],
+                "max_stake": a["max_stake"],
+                "is_active": a["is_active"],
+                "is_primary": a["is_primary"],
+                "note": a.get("note", ""),
+                "created_at": str(a.get("created_at", "")),
+            })
+        return {"accounts": safe_accounts}
+
+    @app.post("/api/accounts")
+    async def create_account(
+        body: Dict[str, Any] = Body(...),
+        user: str = Depends(require_auth),
+    ):
+        """
+        创建交易所账户
+        {
+            "account_id": "binance_main",
+            "label": "Binance 主账户",
+            "exchange": "binance",
+            "api_key": "xxx",
+            "api_secret": "xxx",
+            "passphrase": "",
+            "leverage": 10,
+            "max_stake": 100,
+            "is_primary": true,
+            "note": ""
+        }
+        """
+        from core.db import ExchangeAccountRepository
+        required = ["account_id", "exchange", "api_key", "api_secret"]
+        for field in required:
+            if not body.get(field):
+                raise HTTPException(400, f"Missing required field: {field}")
+
+        valid_exchanges = ["binance", "okx", "bybit", "gate", "bitget"]
+        if body["exchange"] not in valid_exchanges:
+            raise HTTPException(400, f"Invalid exchange. Must be one of: {valid_exchanges}")
+
+        # 检查 account_id 是否已存在
+        existing = await ExchangeAccountRepository.get_by_id(body["account_id"])
+        if existing:
+            raise HTTPException(409, f"Account ID already exists: {body['account_id']}")
+
+        account_data = {
+            "account_id": body["account_id"],
+            "label": body.get("label", body["account_id"]),
+            "exchange": body["exchange"],
+            "api_key": body["api_key"],
+            "api_secret": body["api_secret"],
+            "passphrase": body.get("passphrase", ""),
+            "leverage": body.get("leverage", 10),
+            "position_mode": body.get("position_mode", "one_way"),
+            "max_stake": body.get("max_stake", 100.0),
+            "is_active": body.get("is_active", True),
+            "is_primary": body.get("is_primary", False),
+            "note": body.get("note", ""),
         }
 
-    @app.post("/api/secrets/exchanges")
-    async def update_exchange_secret(body: SecretUpdateRequest, user: str = Depends(require_auth)):
-        """更新交易所密钥"""
-        from core.config import get_settings
-        from core.db import SystemStateRepository
-        s = get_settings()
+        # 如果设为主账户，先取消同交易所其他主账户
+        if account_data["is_primary"]:
+            all_accounts = await ExchangeAccountRepository.get_all(exchange=body["exchange"])
+            for a in all_accounts:
+                if a["is_primary"]:
+                    await ExchangeAccountRepository.update(a["account_id"], {"is_primary": False})
 
-        exchange_map = {
-            "binance": ("binance_api_key", "binance_api_secret", None),
-            "okx": ("okx_api_key", "okx_api_secret", "okx_passphrase"),
-            "bybit": ("bybit_api_key", "bybit_api_secret", None),
-            "gate": ("gate_api_key", "gate_api_secret", None),
-            "bitget": ("bitget_api_key", "bitget_api_secret", "bitget_passphrase"),
+        result = await ExchangeAccountRepository.create(account_data)
+        logger.info(f"Exchange account created: {body['account_id']} ({body['exchange']}) by {user}")
+        return {"status": "ok", "account_id": result["account_id"]}
+
+    @app.put("/api/accounts/{account_id}")
+    async def update_account(
+        account_id: str,
+        body: Dict[str, Any] = Body(...),
+        user: str = Depends(require_auth),
+    ):
+        """
+        更新交易所账户
+        可更新字段: label, api_key, api_secret, passphrase, leverage,
+                    position_mode, max_stake, is_active, is_primary, note
+        """
+        from core.db import ExchangeAccountRepository
+        existing = await ExchangeAccountRepository.get_by_id(account_id)
+        if not existing:
+            raise HTTPException(404, f"Account not found: {account_id}")
+
+        allowed_fields = {
+            "label", "api_key", "api_secret", "passphrase",
+            "leverage", "position_mode", "max_stake",
+            "is_active", "is_primary", "note",
         }
+        updates = {k: v for k, v in body.items() if k in allowed_fields and v is not None}
 
+        # 空字符串的密钥字段不更新（保留原值）
+        if "api_key" in updates and not updates["api_key"]:
+            del updates["api_key"]
+        if "api_secret" in updates and not updates["api_secret"]:
+            del updates["api_secret"]
+        if "passphrase" in updates and updates["passphrase"] == "":
+            del updates["passphrase"]
 
-        if body.exchange not in exchange_map:
-            raise HTTPException(400, f"Invalid exchange: {body.exchange}")
+        # 如果设为主账户
+        if updates.get("is_primary"):
+            await ExchangeAccountRepository.set_primary(account_id)
+            updates.pop("is_primary", None)
 
-        key_attr, secret_attr, pass_attr = exchange_map[body.exchange]
-        if body.api_key:
-            setattr(s.exchange, key_attr, body.api_key)
-            await SystemStateRepository.set(f"secret.{body.exchange}.key", body.api_key)
-        if body.api_secret:
-            setattr(s.exchange, secret_attr, body.api_secret)
-            await SystemStateRepository.set(f"secret.{body.exchange}.secret", body.api_secret)
-        if pass_attr and body.passphrase:
-            setattr(s.exchange, pass_attr, body.passphrase)
-            await SystemStateRepository.set(f"secret.{body.exchange}.passphrase", body.passphrase)
+        if updates:
+            await ExchangeAccountRepository.update(account_id, updates)
 
-        logger.info(f"Exchange secrets updated: {body.exchange} by {user}")
-        return {"status": "ok", "exchange": body.exchange}
+        logger.info(f"Exchange account updated: {account_id} by {user}")
+        return {"status": "ok", "account_id": account_id}
+
+    @app.delete("/api/accounts/{account_id}")
+    async def delete_account(account_id: str, user: str = Depends(require_auth)):
+        """删除交易所账户"""
+        from core.db import ExchangeAccountRepository
+        success = await ExchangeAccountRepository.delete(account_id)
+        if not success:
+            raise HTTPException(404, f"Account not found: {account_id}")
+        logger.info(f"Exchange account deleted: {account_id} by {user}")
+        return {"status": "ok", "account_id": account_id}
+
+    @app.post("/api/accounts/{account_id}/set-primary")
+    async def set_account_primary(account_id: str, user: str = Depends(require_auth)):
+        """将指定账户设为该交易所的主账户"""
+        from core.db import ExchangeAccountRepository
+        success = await ExchangeAccountRepository.set_primary(account_id)
+        if not success:
+            raise HTTPException(404, f"Account not found: {account_id}")
+        return {"status": "ok", "account_id": account_id}
+
+    @app.get("/api/accounts/grouped")
+    async def get_accounts_grouped(user: str = Depends(require_auth)):
+        """按交易所分组获取账户（用于下拉选择等）"""
+        from core.db import ExchangeAccountRepository
+        grouped = await ExchangeAccountRepository.get_active_by_exchange()
+        # 脱敏
+        safe_grouped = {}
+        for exchange, accounts in grouped.items():
+            safe_grouped[exchange] = [
+                {
+                    "account_id": a["account_id"],
+                    "label": a["label"],
+                    "is_primary": a["is_primary"],
+                    "leverage": a["leverage"],
+                    "max_stake": a["max_stake"],
+                }
+                for a in accounts
+            ]
+        return {"exchanges": safe_grouped}
+
+    # ==================== Telegram 配置 ====================
 
     @app.get("/api/secrets/telegram")
     async def get_telegram_secrets(user: str = Depends(require_auth)):

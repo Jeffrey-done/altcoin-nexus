@@ -250,3 +250,42 @@ class ConfigOverrideModel(Base):
     source = Column(String(64), default="admin")
     created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+
+
+class ExchangeAccountModel(Base):
+    """
+    交易所账户表 - 支持同一交易所多个独立账户
+    
+    每个账户拥有独立的 API Key / Secret / Passphrase
+    account_id 全局唯一，用于交易执行时指定账户
+    """
+    __tablename__ = "exchange_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    account_id = Column(String(64), nullable=False, unique=True, index=True)  # 如 "binance_main", "okx_sub1"
+    label = Column(String(128), nullable=False, default="")  # 可读名称，如 "Binance 主账户"
+    exchange = Column(String(32), nullable=False, index=True)  # binance / okx / bybit / gate / bitget
+    
+    # 密钥 (加密存储建议，此处明文仅示意)
+    api_key = Column(Text, nullable=False, default="")
+    api_secret = Column(Text, nullable=False, default="")
+    passphrase = Column(Text, nullable=True, default="")  # OKX / Bitget 需要
+
+    # 账户配置
+    leverage = Column(Integer, default=10)
+    position_mode = Column(String(16), default="one_way")  # one_way / hedge
+    max_stake = Column(Float, default=100.0)  # 该账户最大总仓位
+    is_active = Column(Boolean, default=True)  # 是否启用
+    is_primary = Column(Boolean, default=False)  # 是否为该交易所的主账户
+
+    # 备注
+    note = Column(Text, nullable=True, default="")
+
+    # 时间
+    created_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=_utcnow, onupdate=_utcnow)
+
+    __table_args__ = (
+        Index("ix_exchange_accounts_exchange_active", "exchange", "is_active"),
+    )
