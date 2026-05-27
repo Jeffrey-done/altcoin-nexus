@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 import aiohttp
 import ccxt.async_support as ccxt
+from cachetools import TTLCache
 
 from core.config import get_settings
 from core.events import get_event_bus, EventType
@@ -26,15 +27,16 @@ class DataFeedService:
     - 纯异步数据获取
     - 多交易所支持
     - WebSocket实时行情
-    - 本地缓存
+    - 本地缓存（带TTL和容量限制）
     """
     
     def __init__(self):
         self._settings = get_settings()
         self._exchanges: Dict[str, ccxt.Exchange] = {}
         self._running = False
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        self._cache_ttl: Dict[str, float] = {}
+        # 使用 TTLCache 限制缓存大小和过期时间
+        self._cache = TTLCache(maxsize=1000, ttl=60)  # 最多1000条，60秒过期
+        self._inflight: Dict[str, asyncio.Task] = {}  # 防止重复请求
         self._ws_connections: Dict[str, Any] = {}
         self._subscriptions: Set[str] = set()
         
@@ -140,29 +142,41 @@ class DataFeedService:
         symbol: str,
         exchange: str = "binance",
     ) -> Optional[Dict[str, Any]]:
-        """获取实时行情"""
+        """获取实时行情（带缓存和并发保护）"""
         cache_key = f"{exchange}:{symbol}:ticker"
         
         # 检查缓存
         if cache_key in self._cache:
-            if time.time() - self._cache_ttl.get(cache_key, 0) < 5:
-                return self._cache[cache_key]
+            return self._cache[cache_key]
+        
+        # 如果已有相同请求在飞行中，等待其结果
+        if cache_key in self._inflight:
+            try:
+                return await self._inflight[cache_key]
+            except Exception:
+                return None
         
         if exchange not in self._exchanges:
             logger.warning(f"Exchange {exchange} not available")
             return None
         
+        # 创建 inflight 请求
+        async def _fetch():
+            try:
+                ticker = await self._exchanges[exchange].fetch_ticker(symbol)
+                self._cache[cache_key] = ticker  # TTLCache 自动管理过期
+                return ticker
+            except Exception as e:
+                logger.error(f"Failed to fetch ticker {symbol}: {e}")
+                return None
+        
+        task = asyncio.create_task(_fetch())
+        self._inflight[cache_key] = task
+        
         try:
-            ticker = await self._exchanges[exchange].fetch_ticker(symbol)
-            
-            # 更新缓存
-            self._cache[cache_key] = ticker
-            self._cache_ttl[cache_key] = time.time()
-            
-            return ticker
-        except Exception as e:
-            logger.error(f"Failed to fetch ticker {symbol}: {e}")
-            return None
+            return await task
+        finally:
+            self._inflight.pop(cache_key, None)
     
     async def get_ohlcv(
         self,

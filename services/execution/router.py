@@ -276,24 +276,55 @@ class ExecutionRouter:
             if not ex:
                 raise ValueError(f"Exchange {exchange} not available")
             
-            # 设置杠杆
+            # 设置杠杆 - 失败时中止下单
             try:
                 await ex.set_leverage(leverage, symbol)
             except Exception as e:
-                logger.warning(f"Failed to set leverage: {e}")
+                logger.error(f"CRITICAL: Failed to set leverage for {symbol}: {e}")
+                await EventRepository.log(
+                    "order_failed", symbol=symbol, error=f"Leverage set failed: {e}"
+                )
+                self._stats["total_orders"] += 1
+                self._stats["failed_orders"] += 1
+                return None  # 中止下单
             
-            # 设置保证金模式
+            # 设置保证金模式 - 失败时中止下单
             try:
                 await ex.set_margin_mode("isolated", symbol)
             except Exception as e:
-                logger.warning(f"Failed to set margin mode: {e}")
+                logger.error(f"CRITICAL: Failed to set margin mode for {symbol}: {e}")
+                await EventRepository.log(
+                    "order_failed", symbol=symbol, error=f"Margin mode set failed: {e}"
+                )
+                self._stats["total_orders"] += 1
+                self._stats["failed_orders"] += 1
+                return None  # 中止下单
             
             # 计算下单数量
             ticker = await ex.fetch_ticker(symbol)
-            price = ticker["last"]
+            # 使用 ask/bid 而非 last 作为参考价
+            if direction == "SHORT":
+                price = ticker.get("bid", ticker.get("last", 0))
+            else:
+                price = ticker.get("ask", ticker.get("last", 0))
             amount = (stake * leverage) / price
             
-            # 发布订单发送事件 (P0-3: 补齐 EXECUTION_ORDER_SENT)
+            # 滑点预估保护
+            max_slippage = self.settings.exchange.slippage_alert_pct
+            est_slippage = await self._estimate_slippage(ex, symbol, direction, amount)
+            if est_slippage > max_slippage:
+                logger.warning(
+                    f"Slippage too high for {symbol}: {est_slippage:.2f}% > {max_slippage}%"
+                )
+                await EventRepository.log(
+                    "order_failed", symbol=symbol, 
+                    error=f"Slippage too high: {est_slippage:.2f}%"
+                )
+                self._stats["total_orders"] += 1
+                self._stats["failed_orders"] += 1
+                return None
+            
+            # 发布订单发送事件
             bus = await get_event_bus()
             await bus.publish(EventType.EXECUTION_ORDER_SENT, {
                 "symbol": symbol,
@@ -317,7 +348,7 @@ class ExecutionRouter:
                 params={"clientOrderId": client_order_id},
             )
             
-            # 计算滑点
+            # 计算实际滑点
             fill_price = order.get("average", order.get("price", 0))
             slippage_pct = abs(fill_price - price) / price * 100 if price > 0 else 0
             
@@ -439,6 +470,9 @@ class ExecutionRouter:
             if not ex:
                 raise ValueError(f"Exchange {exchange} not available")
             
+            # 生成平仓订单 ID（用于幂等性保护）
+            close_client_order_id = f"nexus_close_{uuid.uuid4().hex[:16]}"
+            
             # 平仓方向与开仓相反
             side = "buy" if direction == "SHORT" else "sell"
             
@@ -447,7 +481,10 @@ class ExecutionRouter:
                 type="market",
                 side=side,
                 amount=amount,
-                params={"reduceOnly": True},
+                params={
+                    "reduceOnly": True,
+                    "clientOrderId": close_client_order_id,  # 添加幂等性标识
+                },
             )
             
             fill_price = order.get("average", order.get("price", 0))
@@ -459,12 +496,14 @@ class ExecutionRouter:
                 fill_price=fill_price,
                 fill_amount=order.get("filled", 0),
                 exchange=exchange,
+                client_order_id=close_client_order_id,
             )
             
             logger.info(f"Close order filled: {symbol} {direction} price={fill_price}")
             
             return {
                 "order_id": order.get("id", ""),
+                "client_order_id": close_client_order_id,
                 "fill_price": fill_price,
                 "fill_amount": order.get("filled", 0),
             }
@@ -482,6 +521,10 @@ class ExecutionRouter:
         exchange: str = "binance",
     ) -> Optional[Dict[str, Any]]:
         """执行止损单"""
+        if not self._running:
+            logger.warning("ExecutionRouter not running, cannot execute stop loss")
+            return None
+        
         try:
             ex = self._exchanges.get(exchange)
             if not ex:
@@ -516,6 +559,10 @@ class ExecutionRouter:
         exchange: str = "binance",
     ) -> Optional[Dict[str, Any]]:
         """执行止盈单"""
+        if not self._running:
+            logger.warning("ExecutionRouter not running, cannot execute take profit")
+            return None
+        
         try:
             ex = self._exchanges.get(exchange)
             if not ex:
@@ -593,3 +640,54 @@ class ExecutionRouter:
                 status["exchanges"][name] = f"error: {e}"
         
         return status
+    
+    async def _estimate_slippage(
+        self,
+        ex: Any,
+        symbol: str,
+        direction: str,
+        amount: float,
+    ) -> float:
+        """
+        预估滑点百分比
+        
+        通过检查订单簿深度计算预期成交均价与最佳价格的偏差
+        """
+        try:
+            orderbook = await ex.fetch_order_book(symbol, limit=20)
+            
+            if direction == "SHORT":
+                # 做空检查买盘深度
+                entries = orderbook.get("bids", [])
+            else:
+                # 做多检查卖盘深度
+                entries = orderbook.get("asks", [])
+            
+            if not entries:
+                return 0.0
+            
+            # 计算加权平均成交价
+            remaining = amount
+            weighted_price = 0.0
+            total_filled = 0.0
+            
+            for price_level, size in entries:
+                fill = min(remaining, size)
+                weighted_price += fill * price_level
+                total_filled += fill
+                remaining -= fill
+                if remaining <= 0:
+                    break
+            
+            if total_filled <= 0:
+                return 0.0
+            
+            avg_price = weighted_price / total_filled
+            ref_price = entries[0][0]  # 最佳价格
+            
+            slippage = abs(avg_price - ref_price) / ref_price * 100
+            return round(slippage, 4)
+        
+        except Exception as e:
+            logger.warning(f"Slippage estimation failed: {e}")
+            return 0.0  # 估算失败时返回0，不阻止下单

@@ -313,10 +313,11 @@ class SmartOrderEngine:
                 break
             
             try:
-                # 获取当前成交量
-                if self.exchange:
-                    ticker = await self.exchange.fetch_ticker(symbol)
-                    vol_1m = ticker.get("baseVolume", 0) / 60  # 每分钟成交量
+                    # 获取当前成交量 (24小时成交量 / 1440分钟)
+                    if self.exchange:
+                        ticker = await self.exchange.fetch_ticker(symbol)
+                        vol_24h = ticker.get("baseVolume", 0)
+                        vol_1m = vol_24h / (24 * 60)  # 修正：24小时 / 1440分钟
                     
                     # 计算本次执行量
                     target_amount = vol_1m * participation_rate
@@ -370,20 +371,34 @@ class SmartOrderEngine:
         Iceberg 执行
         
         只显示一小部分订单，成交后再挂下一批
+        增加超时保护和动态价格更新
         """
+        import random
+        from datetime import datetime, timezone, timedelta
+        
         display_ratio = config.iceberg_display_size
         variance = config.iceberg_variance
         
         filled_amount = 0.0
         total_cost = 0.0
         filled_orders = 0
+        start_time = datetime.now(timezone.utc)
+        max_iterations = 100  # 最大迭代次数
+        iteration = 0
         
-        import random
-        
-        while filled_amount < amount * 0.99:
+        while filled_amount < amount * 0.99 and iteration < max_iterations:
+            iteration += 1
+            
+            # 超时检查
+            elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
+            if elapsed > config.timeout_sec:
+                logger.warning(f"Iceberg {order_id} timeout after {elapsed:.1f}s")
+                break
+            
             try:
-                # 计算本次显示量（带随机波动）
                 remaining = amount - filled_amount
+                
+                # 计算本次显示量（带随机波动）
                 base_display = amount * display_ratio
                 display_amount = base_display * (1 + random.uniform(-variance, variance))
                 display_amount = min(display_amount, remaining)
@@ -392,36 +407,46 @@ class SmartOrderEngine:
                     break
                 
                 if self.exchange:
+                    # 获取最新价格（动态更新）
+                    try:
+                        ticker = await self.exchange.fetch_ticker(symbol)
+                        current_price = ticker.get("last", price)
+                    except Exception:
+                        current_price = price
+                    
                     # 使用限价单
                     order = await self.exchange.create_order(
                         symbol=symbol,
                         type="limit",
                         side=side,
                         amount=display_amount,
-                        price=price,
+                        price=current_price,
                     )
                     
-                    # 等待成交
-                    await asyncio.sleep(2)
+                    # 等待成交（自适应间隔）
+                    await asyncio.sleep(5)
                     
                     # 检查订单状态
                     order_id_exchange = order.get("id")
                     if order_id_exchange:
-                        order_status = await self.exchange.fetch_order(order_id_exchange, symbol)
-                        
-                        if order_status.get("status") == "closed":
-                            fill_price = order_status.get("average", price)
-                            fill_amount = order_status.get("filled", display_amount)
+                        try:
+                            order_status = await self.exchange.fetch_order(order_id_exchange, symbol)
                             
-                            filled_amount += fill_amount
-                            total_cost += fill_amount * fill_price
-                            filled_orders += 1
-                        else:
-                            # 取消未成交订单
-                            await self.exchange.cancel_order(order_id_exchange, symbol)
+                            if order_status.get("status") == "closed":
+                                fill_price = order_status.get("average", current_price)
+                                filled = order_status.get("filled", display_amount)
+                                
+                                filled_amount += filled
+                                total_cost += filled * fill_price
+                                filled_orders += 1
+                            else:
+                                # 取消未成交订单
+                                await self.exchange.cancel_order(order_id_exchange, symbol)
+                        except Exception as e:
+                            logger.warning(f"Iceberg order status check failed: {e}")
             
             except Exception as e:
-                logger.warning(f"Iceberg execution error: {e}")
+                logger.warning(f"Iceberg iteration {iteration} error: {e}")
                 await asyncio.sleep(5)
         
         avg_price = total_cost / filled_amount if filled_amount > 0 else price

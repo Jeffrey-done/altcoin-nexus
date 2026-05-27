@@ -255,6 +255,9 @@ class RiskControlService(ConfigRefreshMixin):
         # 获取所有持仓
         open_trades = await TradeRepository.get_open()
         
+        # 检查止损/止盈价格
+        await self._check_stop_levels(open_trades)
+        
         # 按账户分组
         accounts: Dict[str, List[Dict]] = {}
         for trade in open_trades:
@@ -269,6 +272,90 @@ class RiskControlService(ConfigRefreshMixin):
                 await self._check_account(account_id, trades)
             except Exception as e:
                 logger.error(f"Risk check error for {account_id}: {e}")
+    
+    async def _check_stop_levels(self, open_trades: List[Dict[str, Any]]) -> None:
+        """
+        检查止损/止盈价格 - 主动触发平仓
+        """
+        bus = await get_event_bus()
+        
+        for trade in open_trades:
+            try:
+                symbol = trade.get("symbol", "")
+                direction = trade.get("direction", "SHORT")
+                trade_id = trade.get("id", "")
+                
+                # 获取当前价格（从缓存或交易所）
+                current_price = trade.get("current_price")
+                if not current_price:
+                    continue
+                
+                # 硬止损检查
+                hard_stop = trade.get("hard_stop_price")
+                if hard_stop:
+                    if direction == "SHORT" and current_price >= hard_stop:
+                        logger.warning(f"HARD STOP triggered: {symbol} price={current_price} >= {hard_stop}")
+                        await bus.publish(EventType.RISK_ALERT, {
+                            "alert_type": "hard_stop_triggered",
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "stop_price": hard_stop,
+                        })
+                    elif direction == "LONG" and current_price <= hard_stop:
+                        logger.warning(f"HARD STOP triggered: {symbol} price={current_price} <= {hard_stop}")
+                        await bus.publish(EventType.RISK_ALERT, {
+                            "alert_type": "hard_stop_triggered",
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "stop_price": hard_stop,
+                        })
+                
+                # 移动止损检查
+                trail_stop = trade.get("trail_stop_price")
+                if trail_stop:
+                    if direction == "SHORT" and current_price >= trail_stop:
+                        logger.warning(f"TRAIL STOP triggered: {symbol} price={current_price} >= {trail_stop}")
+                        await bus.publish(EventType.RISK_ALERT, {
+                            "alert_type": "trail_stop_triggered",
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "stop_price": trail_stop,
+                        })
+                    elif direction == "LONG" and current_price <= trail_stop:
+                        logger.warning(f"TRAIL STOP triggered: {symbol} price={current_price} <= {trail_stop}")
+                        await bus.publish(EventType.RISK_ALERT, {
+                            "alert_type": "trail_stop_triggered",
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "stop_price": trail_stop,
+                        })
+                
+                # 止盈检查
+                tp1 = trade.get("take_profit_1")
+                if tp1 and not trade.get("tp1_triggered"):
+                    if direction == "SHORT" and current_price <= tp1:
+                        logger.info(f"TP1 triggered: {symbol} price={current_price} <= {tp1}")
+                        await bus.publish(EventType.TRADE_TP1, {
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "tp_price": tp1,
+                        })
+                    elif direction == "LONG" and current_price >= tp1:
+                        logger.info(f"TP1 triggered: {symbol} price={current_price} >= {tp1}")
+                        await bus.publish(EventType.TRADE_TP1, {
+                            "trade_id": trade_id,
+                            "symbol": symbol,
+                            "current_price": current_price,
+                            "tp_price": tp1,
+                        })
+            
+            except Exception as e:
+                logger.error(f"Stop level check error for {trade.get('symbol')}: {e}")
     
     async def _check_account(
         self,
@@ -403,9 +490,7 @@ class RiskControlService(ConfigRefreshMixin):
         """记录平仓 - 使用行级锁"""
         # 累加日亏损（使用行级锁）
         if pnl < 0:
-            await RiskRepository.update_with_lock(account_id, {
-                "daily_loss": RiskRepository.increment_daily_loss,
-            })
+            await RiskRepository.add_daily_loss(account_id, abs(pnl))
         
         # 更新连续亏损
         consecutive_losses = await TradeRepository.get_consecutive_losses(account_id)
@@ -413,10 +498,12 @@ class RiskControlService(ConfigRefreshMixin):
             "consecutive_losses": consecutive_losses,
         })
         
-        # 更新缓存
+        # 更新缓存 - 修复清零Bug
         if account_id in self._risk_cache:
-            self._risk_cache[account_id]["daily_loss"] = \
-                self._risk_cache[account_id].get("daily_loss", 0) + abs(pnl) if pnl < 0 else 0
+            if pnl < 0:
+                # 只在亏损时累加，盈利时不修改
+                self._risk_cache[account_id]["daily_loss"] = \
+                    self._risk_cache[account_id].get("daily_loss", 0) + abs(pnl)
             self._risk_cache[account_id]["consecutive_losses"] = consecutive_losses
         
         # 发布事件

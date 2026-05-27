@@ -1,6 +1,7 @@
 """
 FastAPI 管理面板
 支持 API + 前端静态文件托管
+包含身份认证和授权
 """
 
 import logging
@@ -9,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,11 +19,15 @@ from pydantic import BaseModel
 from core.config import get_settings, reload_settings
 from core.db import TradeRepository, CandidateRepository, RiskRepository, EventRepository, SystemStateRepository
 from core.events import EventType, get_event_bus
+from .auth import get_current_user, require_admin, create_session, verify_credentials
 
 logger = logging.getLogger("nexus.admin")
 
 # 前端构建目录
 FRONTEND_DIR = Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+# CORS 允许的来源（从环境变量读取）
+ALLOWED_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:8000").split(",")
 
 
 # Pydantic 模型
@@ -66,17 +71,26 @@ def create_app() -> FastAPI:
         version=settings.version,
     )
     
-    # CORS
+    # CORS - 限制来源
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=ALLOWED_ORIGINS,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
     )
     
     # WebSocket 连接管理
     ws_connections: List[WebSocket] = []
+    
+    # 登录请求模型
+    class LoginRequest(BaseModel):
+        username: str
+        password: str
+    
+    class LoginResponse(BaseModel):
+        token: str
+        expires_in: int
     
     @app.on_event("startup")
     async def startup():
@@ -86,7 +100,27 @@ def create_app() -> FastAPI:
     async def shutdown():
         logger.info("Admin panel shutting down")
     
-    # 健康检查
+    # 登录端点（无需认证）
+    @app.post("/api/auth/login", response_model=LoginResponse)
+    async def login(request: LoginRequest):
+        """用户登录，获取访问令牌"""
+        if not verify_credentials(request.username, request.password):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid credentials",
+            )
+        
+        token = create_session(request.username)
+        return LoginResponse(token=token, expires_in=86400)  # 24小时
+    
+    # 登出端点
+    @app.post("/api/auth/logout")
+    async def logout(user: str = Depends(get_current_user)):
+        """用户登出"""
+        # 实际实现需要从请求中获取 token 并撤销
+        return {"status": "ok"}
+    
+    # 健康检查（无需认证）
     @app.get("/health", response_model=HealthResponse)
     async def health():
         return HealthResponse(
@@ -184,13 +218,16 @@ def create_app() -> FastAPI:
         }
     
     @app.post("/api/config")
-    async def update_config(request: ConfigUpdateRequest):
+    async def update_config(
+        request: ConfigUpdateRequest,
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         # 发布配置变更事件
         bus = await get_event_bus()
         await bus.publish(EventType.CONFIG_CHANGED, {
             "key": request.key,
             "value": request.value,
-            "changed_by": "admin",
+            "changed_by": user,
         })
         return {"status": "ok"}
     
@@ -213,14 +250,16 @@ def create_app() -> FastAPI:
             logger.warning(f"Failed to load blacklist: {e}")
     
     @app.post("/api/execution/panic-sell-all")
-    async def panic_sell_all():
+    async def panic_sell_all(
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         """
         紧急全平仓
         
         立即触发所有持仓的市价平仓单，并进入休眠模式
         通过事件总线通知所有服务，而非直接操作数据库
         """
-        logger.warning("PANIC SELL ALL triggered!")
+        logger.warning(f"PANIC SELL ALL triggered by {user}!")
         
         bus = await get_event_bus()
         
@@ -253,7 +292,10 @@ def create_app() -> FastAPI:
         }
     
     @app.post("/api/strategy/blacklist")
-    async def add_to_blacklist(request: Dict[str, str]):
+    async def add_to_blacklist(
+        request: Dict[str, str],
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         """
         添加币种到黑名单
         
@@ -279,9 +321,10 @@ def create_app() -> FastAPI:
         await bus.publish("strategy.blacklist_added", {
             "symbol": symbol,
             "reason": reason,
+            "added_by": user,
         })
         
-        logger.info(f"Blacklist added: {symbol} - {reason}")
+        logger.info(f"Blacklist added by {user}: {symbol} - {reason}")
         
         return {
             "status": "ok",
@@ -290,13 +333,18 @@ def create_app() -> FastAPI:
         }
     
     @app.delete("/api/strategy/blacklist/{symbol}")
-    async def remove_from_blacklist(symbol: str):
+    async def remove_from_blacklist(
+        symbol: str,
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         """从黑名单移除"""
         _blacklist.discard(symbol)
         
         # 持久化到数据库
         import json
         await SystemStateRepository.set("blacklist", json.dumps(list(_blacklist)))
+        
+        logger.info(f"Blacklist removed by {user}: {symbol}")
         
         return {
             "status": "ok",
@@ -305,7 +353,7 @@ def create_app() -> FastAPI:
         }
     
     @app.get("/api/strategy/blacklist")
-    async def get_blacklist():
+    async def get_blacklist(user: str = Depends(get_current_user)):  # 需要登录
         """获取黑名单"""
         return {
             "blacklist": list(_blacklist),
@@ -313,7 +361,10 @@ def create_app() -> FastAPI:
         }
     
     @app.post("/api/risk/toggle-pause")
-    async def toggle_risk_pause(request: Dict[str, Any]):
+    async def toggle_risk_pause(
+        request: Dict[str, Any],
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         """
         强制熔断/恢复
         
@@ -333,15 +384,15 @@ def create_app() -> FastAPI:
             await bus.publish(EventType.RISK_PAUSED, {
                 "reason": reason,
                 "duration_minutes": duration,
-                "paused_by": "admin",
+                "paused_by": user,
             })
-            logger.warning(f"Risk PAUSED: {reason} for {duration} minutes")
+            logger.warning(f"Risk PAUSED by {user}: {reason} for {duration} minutes")
         else:
             await bus.publish(EventType.RISK_RESUMED, {
                 "reason": reason,
-                "resumed_by": "admin",
+                "resumed_by": user,
             })
-            logger.info(f"Risk RESUMED: {reason}")
+            logger.info(f"Risk RESUMED by {user}: {reason}")
         
         return {
             "status": "ok",
@@ -351,13 +402,15 @@ def create_app() -> FastAPI:
         }
     
     @app.post("/api/optimization/run-now")
-    async def run_optimization_now():
+    async def run_optimization_now(
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         """
         立即触发参数优化
         
         启动 WFA 优化任务
         """
-        logger.info("Manual optimization triggered")
+        logger.info(f"Manual optimization triggered by {user}")
         
         bus = await get_event_bus()
         await bus.publish(EventType.OPTIMIZATION_COMPLETED, {
@@ -371,7 +424,10 @@ def create_app() -> FastAPI:
         }
     
     @app.post("/api/config/regime")
-    async def force_regime(request: Dict[str, str]):
+    async def force_regime(
+        request: Dict[str, str],
+        user: str = Depends(require_admin),  # 需要管理员权限
+    ):
         """
         强制设置市场状态
         
@@ -396,10 +452,10 @@ def create_app() -> FastAPI:
             "new_regime": regime,
             "confidence": 1.0,
             "reason": reason,
-            "forced_by": "admin",
+            "forced_by": user,
         })
         
-        logger.warning(f"Regime FORCED to {regime}: {reason}")
+        logger.warning(f"Regime FORCED to {regime} by {user}: {reason}")
         
         return {
             "status": "ok",
@@ -408,7 +464,7 @@ def create_app() -> FastAPI:
         }
     
     @app.get("/api/system/pulse")
-    async def system_pulse():
+    async def system_pulse(user: str = Depends(get_current_user)):  # 需要登录
         """
         系统脉搏 - 返回所有服务状态
         """

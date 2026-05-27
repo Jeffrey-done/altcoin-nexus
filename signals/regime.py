@@ -33,7 +33,7 @@ class RegimeState:
     confidence: float  # 0-1
     btc_trend: float   # BTC 24h 涨跌幅
     volatility: float  # 波动率
-    funding_rate: avg_funding_rate  # 平均资金费率
+    funding_rate: float  # 平均资金费率
     timestamp: datetime
 
 
@@ -56,6 +56,7 @@ class MarketRegimeDetector:
         
         # 当前状态
         self._current_regime: Optional[RegimeState] = None
+        self._previous_regime: Optional[MarketRegime] = None  # 新增：前一个状态
         self._regime_history: List[RegimeState] = []
         
         # 阈值配置
@@ -167,24 +168,35 @@ class MarketRegimeDetector:
         """
         # 崩盘检测
         if btc_trend < self._crash_threshold:
+            self._previous_regime = MarketRegime.CRASH
             return MarketRegime.CRASH, 0.9
+        
+        # RECOVERY 检测：从崩盘状态恢复
+        if self._previous_regime == MarketRegime.CRASH and btc_trend > 0:
+            self._previous_regime = MarketRegime.RECOVERY
+            return MarketRegime.RECOVERY, 0.75
         
         # 暴涨检测
         if btc_trend > self._pump_threshold:
+            self._previous_regime = MarketRegime.TRENDING_UP
             return MarketRegime.TRENDING_UP, 0.85
         
         # 高波动检测
         if volatility > self._high_vol_threshold:
+            self._previous_regime = MarketRegime.HIGH_VOLATILITY
             return MarketRegime.HIGH_VOLATILITY, 0.8
         
         # 趋势检测
         if btc_trend > self._trend_threshold:
+            self._previous_regime = MarketRegime.TRENDING_UP
             return MarketRegime.TRENDING_UP, 0.75
         
         if btc_trend < -self._trend_threshold:
+            self._previous_regime = MarketRegime.TRENDING_DOWN
             return MarketRegime.TRENDING_DOWN, 0.75
         
         # 震荡
+        self._previous_regime = MarketRegime.RANGING
         return MarketRegime.RANGING, 0.7
     
     async def _calculate_volatility(self, symbol: str) -> float:
