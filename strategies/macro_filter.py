@@ -80,6 +80,10 @@ class MacroFilter:
                 MarketRegime.RECOVERY: {"SHORT": -5, "LONG": 10},
             },
             
+            # 乘数上限保护
+            "max_multiplier": 2.0,  # 最大乘数不超过2倍
+            "min_multiplier": 0.0,  # 最小乘数
+            
             # BTC 趋势阈值
             "btc_crash_threshold": -8.0,
             "btc_pump_threshold": 10.0,
@@ -128,35 +132,42 @@ class MacroFilter:
         
         # 检查是否允许开仓
         allow_open = True
-        reason = ""
+        reasons = []  # 使用列表累加原因
         
         # 崩盘检查
         if regime == MarketRegime.CRASH:
             allow_open = False
-            reason = "Market crash detected"
+            reasons.append("Market crash detected")
         
         # BTC 极端行情检查
         if btc_trend < self._config["btc_crash_threshold"]:
             stake_multiplier *= 0.5
             score_bonus -= 10
-            reason = f"BTC crash: {btc_trend:.1f}%"
+            reasons.append(f"BTC crash: {btc_trend:.1f}%")
         
         if btc_trend > self._config["btc_pump_threshold"]:
             if direction == "SHORT":
                 stake_multiplier *= 0.3
                 score_bonus -= 15
-                reason = f"BTC pump: {btc_trend:.1f}%"
+                reasons.append(f"BTC pump: {btc_trend:.1f}%")
         
         # 恐惧贪婪指数检查
         if fear_greed < self._config["fear_greed_extreme_fear"]:
             if direction == "SHORT":
-                stake_multiplier *= 0.5  # 极度恐惧时做空减仓
-                reason = f"Extreme fear: {fear_greed}"
+                stake_multiplier *= 0.5
+            elif direction == "LONG":
+                stake_multiplier *= 1.2  # 极度恐惧时做多加仓
+            reasons.append(f"Extreme fear: {fear_greed}")
         
         if fear_greed > self._config["fear_greed_extreme_greed"]:
             if direction == "LONG":
-                stake_multiplier *= 0.5  # 极度贪婪时做多减仓
-                reason = f"Extreme greed: {fear_greed}"
+                stake_multiplier *= 0.5
+            reasons.append(f"Extreme greed: {fear_greed}")
+        
+        # 乘数上限保护
+        max_mult = self._config["max_multiplier"]
+        min_mult = self._config["min_multiplier"]
+        stake_multiplier = max(min(stake_multiplier, max_mult), min_mult)
         
         return MacroDecision(
             regime=regime,
@@ -164,7 +175,7 @@ class MacroFilter:
             stake_multiplier=stake_multiplier,
             score_bonus=score_bonus,
             allow_open=allow_open,
-            reason=reason,
+            reason="; ".join(reasons) if reasons else "",
         )
     
     def get_regime_multiplier(self, direction: str) -> float:

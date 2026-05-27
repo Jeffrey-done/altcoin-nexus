@@ -177,14 +177,40 @@ class SelfHealingService:
         }
     
     async def _get_exchange_positions(self, exchange: str) -> List[Dict[str, Any]]:
-        """获取交易所持仓"""
+        """
+        获取交易所真实持仓
+        
+        通过 ExecutionRouter 调用交易所 API 获取当前持仓
+        """
         if not self.execution_router:
-            return []
+            logger.error("execution_router not available, cannot get positions")
+            raise RuntimeError("execution_router not available")
         
         try:
-            # 调用执行路由器获取持仓
-            # 这里需要根据实际实现调整
-            return []
+            ex = self.execution_router._exchanges.get(exchange)
+            if not ex:
+                logger.warning(f"Exchange {exchange} not connected")
+                return []
+            
+            # 调用交易所 API 获取持仓
+            raw_positions = await ex.fetch_positions()
+            
+            positions = []
+            for pos in raw_positions:
+                contracts = float(pos.get("contracts", 0))
+                if contracts != 0:
+                    positions.append({
+                        "symbol": pos["symbol"],
+                        "direction": "LONG" if pos.get("side") == "long" else "SHORT",
+                        "amount": abs(contracts),
+                        "entry_price": float(pos.get("entryPrice", 0)),
+                        "unrealized_pnl": float(pos.get("unrealizedPnl", 0)),
+                        "leverage": int(pos.get("leverage", 1)),
+                        "exchange": exchange,
+                    })
+            
+            return positions
+        
         except Exception as e:
             logger.error(f"Failed to get positions from {exchange}: {e}")
             raise
@@ -195,7 +221,10 @@ class SelfHealingService:
         local_trades: List[Dict[str, Any]],
         exchange_positions: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """对比持仓"""
+        """
+        对比持仓 - 发布 POSITION_MISMATCH 事件
+        """
+        bus = await get_event_bus()
         discrepancies = []
         
         # 本地持仓的 symbol 集合
@@ -215,8 +244,18 @@ class SelfHealingService:
                     "trade_id": trade.get("id"),
                     "action": "close_local",
                 })
+                # 发布持仓不一致事件
+                await bus.publish(EventType.POSITION_MISMATCH, {
+                    "type": "local_only",
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "trade_id": trade.get("id"),
+                    "local_direction": trade.get("direction"),
+                    "local_amount": trade.get("shares", 0),
+                    "message": f"Local has {symbol} but exchange doesn't",
+                })
         
-        # 检查：交易所有但本地没有（需要记录）
+        # 检查：交易所有但本地没有（需要调查）
         for pos in exchange_positions:
             symbol = pos.get("symbol")
             if symbol not in local_symbols:
@@ -224,7 +263,17 @@ class SelfHealingService:
                     "type": "exchange_only",
                     "exchange": exchange,
                     "symbol": symbol,
+                    "position": pos,
                     "action": "investigate",
+                })
+                # 发布持仓不一致事件
+                await bus.publish(EventType.POSITION_MISMATCH, {
+                    "type": "exchange_only",
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "exchange_direction": pos.get("direction"),
+                    "exchange_amount": pos.get("amount", 0),
+                    "message": f"Exchange has {symbol} but local doesn't",
                 })
         
         return discrepancies
@@ -347,3 +396,15 @@ class SelfHealingService:
             "circuit_breakers": self.get_circuit_breakers(),
             "stats": self._reconciliation_stats,
         }
+
+
+# 全局单例
+_healing_service: Optional[SelfHealingService] = None
+
+
+def get_healing_service(execution_router=None) -> SelfHealingService:
+    """获取全局自愈服务实例"""
+    global _healing_service
+    if _healing_service is None:
+        _healing_service = SelfHealingService(execution_router)
+    return _healing_service

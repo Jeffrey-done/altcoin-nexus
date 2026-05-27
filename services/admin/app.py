@@ -530,7 +530,7 @@ def create_app() -> FastAPI:
         }
     
     @app.get("/api/config/manager")
-    async def config_manager_status():
+    async def config_manager_status(user: str = Depends(get_current_user)):
         """
         配置管理器状态
         """
@@ -538,6 +538,116 @@ def create_app() -> FastAPI:
         
         manager = await get_config_manager()
         return manager.get_status()
+    
+    # ==================== 对账与熔断器 API ====================
+    
+    @app.get("/api/reconciliation/status")
+    async def reconciliation_status(user: str = Depends(get_current_user)):
+        """
+        获取对账状态
+        """
+        from services.monitor.healing import get_healing_service
+        
+        healing = get_healing_service()
+        return {
+            "status": "active" if healing._running else "inactive",
+            "stats": healing._reconciliation_stats,
+            "circuit_breakers": healing.get_circuit_breakers(),
+            "last_check": healing._reconciliation_stats.get("last_check"),
+        }
+    
+    @app.post("/api/reconciliation/run")
+    async def run_reconciliation(user: str = Depends(require_admin)):
+        """
+        手动触发对账
+        """
+        from services.monitor.healing import get_healing_service
+        
+        healing = get_healing_service()
+        result = await healing._run_reconciliation()
+        
+        return {
+            "status": "ok",
+            "result": result,
+        }
+    
+    @app.post("/api/circuit-breaker/reset")
+    async def reset_circuit_breaker(
+        request: Dict[str, str],
+        user: str = Depends(require_admin),
+    ):
+        """
+        重置熔断器
+        
+        {
+            "exchange": "binance"
+        }
+        """
+        exchange = request.get("exchange", "")
+        if not exchange:
+            raise HTTPException(status_code=400, detail="exchange is required")
+        
+        from services.monitor.healing import get_healing_service, CircuitState
+        
+        healing = get_healing_service()
+        
+        if exchange in healing._circuit_breakers:
+            breaker = healing._circuit_breakers[exchange]
+            breaker.state = CircuitState.CLOSED
+            breaker.failure_count = 0
+            breaker.open_until = None
+            
+            logger.info(f"Circuit breaker {exchange} manually reset by {user}")
+            
+            # 发布恢复事件
+            bus = await get_event_bus()
+            await bus.publish(EventType.SYSTEM_RECOVER, {
+                "exchange": exchange,
+                "reason": f"Manual reset by {user}",
+            })
+            
+            return {
+                "status": "ok",
+                "exchange": exchange,
+                "new_state": "CLOSED",
+            }
+        else:
+            raise HTTPException(status_code=404, detail=f"No circuit breaker for {exchange}")
+    
+    @app.post("/api/system/recover")
+    async def system_recover(user: str = Depends(require_admin)):
+        """
+        系统一键恢复
+        
+        重置所有熔断器，取消暂停状态
+        """
+        from services.monitor.healing import get_healing_service, CircuitState
+        
+        healing = get_healing_service()
+        reset_count = 0
+        
+        # 重置所有熔断器
+        for exchange, breaker in healing._circuit_breakers.items():
+            if breaker.state != CircuitState.CLOSED:
+                breaker.state = CircuitState.CLOSED
+                breaker.failure_count = 0
+                breaker.open_until = None
+                reset_count += 1
+        
+        # 发布系统恢复事件
+        bus = await get_event_bus()
+        await bus.publish(EventType.SYSTEM_RECOVER, {
+            "reason": f"System-wide recovery by {user}",
+            "reset_breakers": reset_count,
+        })
+        
+        logger.warning(f"System recovery triggered by {user}, reset {reset_count} breakers")
+        
+        return {
+            "status": "ok",
+            "reset_breakers": reset_count,
+            "message": "System recovered successfully",
+        }
     
     # WebSocket 实时推送
     @app.websocket("/ws")

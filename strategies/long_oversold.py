@@ -144,7 +144,7 @@ class LongOversoldStrategy(BaseStrategy):
         if vol_ratio < config["vol_ratio_min"]:
             return None
         
-        # 检查资金费率 (可选)
+        # 检查资金费率
         funding_rate = 0
         if self.datafeed:
             try:
@@ -154,8 +154,11 @@ class LongOversoldStrategy(BaseStrategy):
             except:
                 pass
         
-        # 资金费率过低说明空头拥挤，反弹概率大
-        # 但也不能太低（可能有爆仓风险）
+        # 资金费率过滤：做多时，费率过高说明多头拥挤，拒绝信号
+        # 阈值：0.1% (0.001)
+        if funding_rate > 0.001:
+            logger.debug(f"Reject {symbol}: funding rate too high for LONG ({funding_rate:.4f})")
+            return None
         
         return {
             "symbol": symbol,

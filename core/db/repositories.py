@@ -299,49 +299,52 @@ class CandidateRepository:
 
     @staticmethod
     async def upsert(candidate_data: Dict[str, Any]) -> Dict[str, Any]:
-        """创建或更新候选"""
+        """
+        创建或更新候选 - 使用行级锁防止竞态条件
+        """
         db = await get_db()
         async with db.session() as session:
-            symbol = candidate_data["symbol"]
-            strategy = candidate_data.get("strategy", "short_overbought")
-            
-            # 查找现有候选
-            result = await session.execute(
-                select(CandidateModel).where(
-                    and_(
-                        CandidateModel.symbol == symbol,
-                        CandidateModel.strategy == strategy,
+            async with session.begin():
+                symbol = candidate_data["symbol"]
+                strategy = candidate_data.get("strategy", "short_overbought")
+                
+                # 序列化metadata
+                if "metadata" in candidate_data and isinstance(candidate_data["metadata"], dict):
+                    candidate_data["metadata_json"] = json.dumps(
+                        candidate_data["metadata"], ensure_ascii=False
                     )
+                    del candidate_data["metadata"]
+                
+                # 使用 SELECT ... FOR UPDATE 锁定行
+                result = await session.execute(
+                    select(CandidateModel).where(
+                        and_(
+                            CandidateModel.symbol == symbol,
+                            CandidateModel.strategy == strategy,
+                        )
+                    ).with_for_update()
                 )
-            )
-            existing = result.scalar_one_or_none()
-            
-            # 序列化metadata
-            if "metadata" in candidate_data and isinstance(candidate_data["metadata"], dict):
-                candidate_data["metadata_json"] = json.dumps(
-                    candidate_data["metadata"], ensure_ascii=False
-                )
-                del candidate_data["metadata"]
-            
-            if existing:
-                for key, value in candidate_data.items():
-                    if hasattr(existing, key) and key != "id":
-                        setattr(existing, key, value)
-                existing.updated_at = _utcnow()
-                await session.flush()
-                await session.refresh(existing)
-                return {c.name: getattr(existing, c.name) for c in existing.__table__.columns}
-            else:
-                candidate_data.setdefault("strategy", "short_overbought")
-                candidate_data.setdefault("direction", "SHORT")
-                candidate = CandidateModel(**{
-                    k: v for k, v in candidate_data.items()
-                    if hasattr(CandidateModel, k)
-                })
-                session.add(candidate)
-                await session.flush()
-                await session.refresh(candidate)
-                return {c.name: getattr(candidate, c.name) for c in candidate.__table__.columns}
+                existing = result.scalar_one_or_none()
+                
+                if existing:
+                    # 更新现有记录
+                    for key, value in candidate_data.items():
+                        if hasattr(existing, key) and key not in ("id", "created_at"):
+                            setattr(existing, key, value)
+                    existing.updated_at = _utcnow()
+                    await session.flush()
+                    return {c.name: getattr(existing, c.name) for c in existing.__table__.columns}
+                else:
+                    # 插入新记录
+                    candidate_data.setdefault("strategy", "short_overbought")
+                    candidate_data.setdefault("direction", "SHORT")
+                    candidate = CandidateModel(**{
+                        k: v for k, v in candidate_data.items()
+                        if hasattr(CandidateModel, k)
+                    })
+                    session.add(candidate)
+                    await session.flush()
+                    return {c.name: getattr(candidate, c.name) for c in candidate.__table__.columns}
 
     @staticmethod
     async def get_active(

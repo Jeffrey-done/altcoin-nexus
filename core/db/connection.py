@@ -118,20 +118,27 @@ class AsyncDatabase:
 
 # 全局数据库实例
 _db: Optional[AsyncDatabase] = None
+_db_lock: asyncio.Lock = asyncio.Lock()
 
 
 async def get_db() -> AsyncDatabase:
-    """获取全局数据库实例"""
+    """获取全局数据库实例（线程安全）"""
     global _db
-    if _db is None:
-        _db = AsyncDatabase()
-        await _db.initialize()
-    return _db
+    if _db is not None:
+        return _db
+    
+    async with _db_lock:
+        # Double-check: 可能在等待锁期间已被其他协程初始化
+        if _db is None:
+            _db = AsyncDatabase()
+            await _db.initialize()
+        return _db
 
 
 async def close_db() -> None:
     """关闭全局数据库连接"""
     global _db
-    if _db:
-        await _db.close()
-        _db = None
+    async with _db_lock:
+        if _db:
+            await _db.close()
+            _db = None

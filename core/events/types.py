@@ -32,6 +32,10 @@ class EventType(str, Enum):
     RISK_PAUSED = "risk.paused"
     RISK_RESUMED = "risk.resumed"
     
+    # 对账事件
+    POSITION_MISMATCH = "position.mismatch"  # 持仓不一致
+    RECONCILIATION_COMPLETED = "reconciliation.completed"  # 对账完成
+    
     # 信号事件
     SIGNAL_SCORED = "signal.scored"
     SIGNAL_TRIGGERED = "signal.triggered"
