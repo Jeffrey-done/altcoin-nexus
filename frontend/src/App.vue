@@ -1,185 +1,72 @@
 <template>
-  <div class="min-h-screen bg-gray-900">
+  <div v-if="authStore.isAuthenticated && $route.path !== '/login'" class="flex h-screen">
     <!-- 侧边栏 -->
-    <aside class="fixed inset-y-0 left-0 w-64 bg-gray-800 border-r border-gray-700">
-      <div class="flex flex-col h-full">
-        <!-- Logo -->
-        <div class="p-4 border-b border-gray-700">
-          <h1 class="text-xl font-bold text-primary-400">
-            <span class="text-2xl">◆</span> Altcoin Nexus
-          </h1>
-          <p class="text-xs text-gray-500 mt-1">L4级量化交易系统</p>
+    <aside class="w-56 bg-gray-800 border-r border-gray-700 flex flex-col flex-shrink-0">
+      <div class="p-4 border-b border-gray-700">
+        <h1 class="text-lg font-bold text-sky-400">Altcoin Nexus</h1>
+        <p class="text-[10px] text-gray-500 mt-0.5">L4 自治量化系统 v4.0</p>
+      </div>
+      <nav class="flex-1 p-3 space-y-1 overflow-y-auto">
+        <router-link v-for="item in nav" :key="item.path" :to="item.path"
+          class="flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors"
+          :class="$route.path === item.path ? 'bg-sky-600/20 text-sky-400' : 'text-gray-400 hover:bg-gray-700 hover:text-white'">
+          <span class="text-base">{{ item.icon }}</span>
+          <span>{{ item.label }}</span>
+        </router-link>
+      </nav>
+      <div class="p-3 border-t border-gray-700">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="w-2 h-2 rounded-full" :class="wsConnected ? 'bg-emerald-400' : 'bg-red-400'"></span>
+          <span class="text-xs text-gray-400">{{ wsConnected ? '实时连接' : '未连接' }}</span>
         </div>
-
-        <!-- 导航菜单 -->
-        <nav class="flex-1 p-4 space-y-1">
-          <router-link
-            v-for="item in menuItems"
-            :key="item.path"
-            :to="item.path"
-            class="flex items-center px-3 py-2 rounded-lg transition-colors"
-            :class="[
-              $route.path === item.path
-                ? 'bg-primary-600 text-white'
-                : 'text-gray-400 hover:bg-gray-700 hover:text-white'
-            ]"
-          >
-            <span class="mr-3 text-lg">{{ item.icon }}</span>
-            <span>{{ item.label }}</span>
-          </router-link>
-        </nav>
-
-        <!-- 系统状态 -->
-        <div class="p-4 border-t border-gray-700">
-          <div class="flex items-center space-x-2">
-            <span class="w-2 h-2 rounded-full" :class="wsStatusClass"></span>
-            <span class="text-sm text-gray-400">{{ wsStatusText }}</span>
-          </div>
-          <!-- 通知指示器 -->
-          <div v-if="hasNotifications" class="mt-2 flex items-center space-x-1">
-            <span class="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
-            <span class="text-xs text-yellow-400">{{ notificationCount }} 条通知</span>
-          </div>
-        </div>
+        <button @click="handleLogout" class="w-full btn-ghost text-xs">退出登录</button>
       </div>
     </aside>
-
-    <!-- 主内容区 -->
-    <main class="ml-64 min-h-screen">
-      <!-- 顶部栏 -->
-      <header class="sticky top-0 z-10 bg-gray-800/80 backdrop-blur-sm border-b border-gray-700">
-        <div class="flex items-center justify-between px-6 py-3">
-          <h2 class="text-lg font-semibold">{{ currentPageTitle }}</h2>
-          <div class="flex items-center space-x-4">
-            <!-- 实时状态指示 -->
-            <div class="flex items-center space-x-2">
-              <span class="w-2 h-2 rounded-full" :class="wsStatusClass"></span>
-              <span class="text-xs text-gray-400">{{ wsStatusText }}</span>
-            </div>
-            <!-- 余额显示 -->
-            <div class="text-sm">
-              <span class="text-gray-400">余额:</span>
-              <span class="ml-1 font-mono">${{ balance?.toLocaleString() || '0' }}</span>
-            </div>
-            <!-- 时间 -->
-            <div class="text-sm text-gray-400 font-mono">
-              {{ currentTime }}
-            </div>
-          </div>
-        </div>
-      </header>
-
-      <!-- 页面内容 -->
-      <div class="p-6">
-        <router-view v-slot="{ Component }">
-          <transition name="fade" mode="out-in">
-            <component :is="Component" />
-          </transition>
-        </router-view>
-      </div>
+    <!-- 主内容 -->
+    <main class="flex-1 overflow-y-auto">
+      <router-view />
     </main>
-
-    <!-- 通知弹窗 -->
-    <div v-if="showNotification" class="fixed bottom-4 right-4 z-50">
-      <div class="bg-gray-800 border border-gray-700 rounded-lg shadow-lg p-4 max-w-sm">
-        <div class="flex items-start space-x-3">
-          <span class="text-xl">{{ notificationIcon }}</span>
-          <div class="flex-1">
-            <p class="font-medium text-white">{{ notificationTitle }}</p>
-            <p class="text-sm text-gray-400">{{ notificationMessage }}</p>
-          </div>
-          <button @click="dismissNotification" class="text-gray-500 hover:text-white">
-            ✕
-          </button>
-        </div>
-      </div>
-    </div>
   </div>
+  <router-view v-else />
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
-import { useSystemStore } from '@/stores'
-import { useRealtimeSync } from '@/utils/websocket'
+import { ref, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores'
 
-const route = useRoute()
-const systemStore = useSystemStore()
+const authStore = useAuthStore()
+const router = useRouter()
+const wsConnected = ref(false)
+let ws: WebSocket | null = null
 
-const currentTime = ref('')
-const balance = ref(1000)
-let timeInterval: ReturnType<typeof setInterval>
-
-// WebSocket 实时同步
-const { startSync, stopSync, connected } = useRealtimeSync()
-
-// 通知状态
-const showNotification = ref(false)
-const notificationTitle = ref('')
-const notificationMessage = ref('')
-const notificationIcon = ref('📢')
-const notificationCount = ref(0)
-const hasNotifications = computed(() => notificationCount.value > 0)
-
-const menuItems = [
-  { path: '/', label: '仪表盘', icon: '📊' },
-  { path: '/trades', label: '交易管理', icon: '📈' },
-  { path: '/candidates', label: '候选池', icon: '🎯' },
-  { path: '/signals', label: '信号日志', icon: '📡' },
-  { path: '/risk', label: '风控状态', icon: '🛡️' },
-  { path: '/settings', label: '系统设置', icon: '⚙️' },
+const nav = [
+  { path: '/', icon: '📊', label: '仪表盘' },
+  { path: '/trades', icon: '📈', label: '交易管理' },
+  { path: '/candidates', icon: '🎯', label: '候选池' },
+  { path: '/signals', icon: '📡', label: '信号日志' },
+  { path: '/risk', icon: '🛡️', label: '风控状态' },
+  { path: '/config', icon: '⚙️', label: '策略配置' },
+  { path: '/secrets', icon: '🔑', label: '密钥管理' },
+  { path: '/system', icon: '🖥️', label: '系统监控' },
+  { path: '/account', icon: '👤', label: '账号安全' },
 ]
 
-const currentPageTitle = computed(() => {
-  const item = menuItems.find(m => m.path === route.path)
-  return item?.label || '仪表盘'
-})
-
-const wsStatusClass = computed(() => 
-  connected ? 'bg-green-400' : 'bg-red-400'
-)
-
-const wsStatusText = computed(() => 
-  connected ? '实时连接' : '未连接'
-)
-
-function updateTime() {
-  currentTime.value = new Date().toLocaleTimeString('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-  })
+function connectWs() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  ws = new WebSocket(`${proto}//${location.host}/ws`)
+  ws.onopen = () => { wsConnected.value = true }
+  ws.onclose = () => { wsConnected.value = false; setTimeout(connectWs, 3000) }
+  ws.onerror = () => { ws?.close() }
 }
 
-// 显示通知
-function notify(title: string, message: string, icon: string = '📢') {
-  notificationTitle.value = title
-  notificationMessage.value = message
-  notificationIcon.value = icon
-  showNotification.value = true
-  notificationCount.value++
-  
-  // 自动关闭
-  setTimeout(() => {
-    showNotification.value = false
-  }, 5000)
-}
-
-function dismissNotification() {
-  showNotification.value = false
+function handleLogout() {
+  authStore.logout()
+  router.push('/login')
 }
 
 onMounted(() => {
-  updateTime()
-  timeInterval = setInterval(updateTime, 1000)
-  systemStore.fetchStatus()
-  
-  // 启动 WebSocket 实时同步
-  startSync()
+  if (authStore.isAuthenticated) { authStore.fetchMe(); connectWs() }
 })
-
-onUnmounted(() => {
-  clearInterval(timeInterval)
-  stopSync()
-})
+onUnmounted(() => { ws?.close() })
 </script>

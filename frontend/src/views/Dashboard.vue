@@ -1,269 +1,95 @@
 <template>
-  <div class="space-y-6">
+  <div class="p-6 space-y-6">
+    <h2 class="text-xl font-bold">仪表盘</h2>
     <!-- 统计卡片 -->
-    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-      <StatCard
-        title="持仓数量"
-        :value="tradeStore.openTrades.length"
-        icon="📈"
-        color="primary"
-      />
-      <StatCard
-        title="今日盈亏"
-        :value="formatPnl(todayPnl)"
-        :is-pnl="true"
-        icon="💰"
-        :color="todayPnl >= 0 ? 'green' : 'red'"
-      />
-      <StatCard
-        title="持仓总值"
-        :value="`$${tradeStore.totalStake.toFixed(2)}`"
-        icon="🏦"
-        color="blue"
-      />
-      <StatCard
-        title="候选数量"
-        :value="candidateStore.candidates.length"
-        icon="🎯"
-        color="yellow"
-      />
-    </div>
-
-    <!-- 系统状态栏 -->
-    <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-      <!-- 对账状态 -->
+    <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
       <div class="card">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-sm font-medium text-gray-400">对账状态</h3>
-          <button 
-            @click="refreshReconciliation" 
-            class="text-xs text-primary-400 hover:text-primary-300"
-          >
-            刷新
-          </button>
-        </div>
-        <div class="flex items-center space-x-3">
-          <span 
-            class="w-3 h-3 rounded-full"
-            :class="reconciliationStatusClass"
-          ></span>
-          <div>
-            <p class="text-sm font-medium">{{ reconciliationStatusText }}</p>
-            <p class="text-xs text-gray-500">
-              上次检查: {{ reconciliation.last_check || '未检查' }}
-            </p>
-          </div>
-        </div>
-        <div class="mt-3 grid grid-cols-2 gap-2 text-xs">
-          <div class="bg-gray-700 rounded p-2">
-            <span class="text-gray-400">检查次数:</span>
-            <span class="ml-1 font-mono">{{ reconciliation.stats?.total_checks || 0 }}</span>
-          </div>
-          <div class="bg-gray-700 rounded p-2">
-            <span class="text-gray-400">发现差异:</span>
-            <span class="ml-1 font-mono" :class="discrepancies > 0 ? 'text-yellow-400' : 'text-green-400'">
-              {{ discrepancies }}
-            </span>
-          </div>
-        </div>
+        <p class="text-xs text-gray-400">持仓数量</p>
+        <p class="stat-value text-sky-400">{{ s.open_trades || 0 }}</p>
       </div>
-
-      <!-- 熔断器状态 -->
       <div class="card">
-        <div class="flex items-center justify-between mb-4">
-          <h3 class="text-sm font-medium text-gray-400">熔断器状态</h3>
-          <button 
-            @click="systemRecover" 
-            class="px-3 py-1 text-xs bg-yellow-600 hover:bg-yellow-700 rounded"
-            :disabled="!hasOpenBreakers"
-          >
-            一键恢复
-          </button>
-        </div>
-        <div class="space-y-2">
-          <div 
-            v-for="(breaker, exchange) in circuitBreakers" 
-            :key="exchange"
-            class="flex items-center justify-between p-2 bg-gray-700 rounded"
-          >
-            <div class="flex items-center space-x-2">
-              <span 
-                class="w-2 h-2 rounded-full"
-                :class="breakerStateClass(breaker.state)"
-              ></span>
-              <span class="text-sm">{{ exchange }}</span>
-            </div>
-            <div class="flex items-center space-x-2">
-              <span class="text-xs text-gray-400">
-                {{ breaker.state === 'open' ? '熔断中' : breaker.state === 'half_open' ? '探测中' : '正常' }}
-              </span>
-              <button 
-                v-if="breaker.state !== 'closed'"
-                @click="resetBreaker(exchange)"
-                class="text-xs text-primary-400 hover:text-primary-300"
-              >
-                重置
-              </button>
-            </div>
-          </div>
-          <div v-if="Object.keys(circuitBreakers).length === 0" class="text-center text-gray-500 text-sm py-2">
-            无熔断器
-          </div>
-        </div>
+        <p class="text-xs text-gray-400">今日盈亏</p>
+        <p class="stat-value" :class="(s.today_pnl||0) >= 0 ? 'text-profit' : 'text-loss'">
+          {{ (s.today_pnl||0) >= 0 ? '+' : '' }}${{ (s.today_pnl||0).toFixed(2) }}
+        </p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-400">持仓总值</p>
+        <p class="stat-value text-blue-400">${{ (s.total_stake||0).toFixed(2) }}</p>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-400">候选数量</p>
+        <p class="stat-value text-yellow-400">{{ s.candidates_count || 0 }}</p>
       </div>
     </div>
-
-    <!-- 图表区域 -->
-    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-      <!-- 盈亏曲线 -->
+    <!-- 风控摘要 -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
       <div class="card">
-        <h3 class="text-sm font-medium text-gray-400 mb-4">累计盈亏曲线</h3>
-        <PnlChart :data="pnlHistory" />
+        <p class="text-xs text-gray-400 mb-2">日亏损</p>
+        <div class="flex justify-between text-sm mb-1">
+          <span>${{ s.daily_loss || 0 }}</span>
+          <span class="text-gray-500">/ ${{ s.daily_loss_limit || 100 }}</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-2">
+          <div class="h-2 rounded-full transition-all" :class="lossBarClass" :style="{ width: lossPct + '%' }"></div>
+        </div>
       </div>
-
-      <!-- 持仓分布 -->
       <div class="card">
-        <h3 class="text-sm font-medium text-gray-400 mb-4">持仓方向分布</h3>
-        <DirectionChart :data="directionData" />
+        <p class="text-xs text-gray-400 mb-2">今日开仓</p>
+        <div class="flex justify-between text-sm mb-1">
+          <span>{{ s.today_trades || 0 }} 笔</span>
+          <span class="text-gray-500">/ {{ s.max_daily_trades || 10 }}</span>
+        </div>
+        <div class="w-full bg-gray-700 rounded-full h-2">
+          <div class="h-2 rounded-full bg-sky-500 transition-all" :style="{ width: tradePct + '%' }"></div>
+        </div>
+      </div>
+      <div class="card">
+        <p class="text-xs text-gray-400 mb-2">连续亏损</p>
+        <p class="stat-value" :class="(s.consecutive_losses||0)>0?'text-loss':'text-profit'">
+          {{ s.consecutive_losses || 0 }}
+        </p>
+        <p class="text-xs text-gray-500">暂停阈值: {{ s.max_daily_trades ? 3 : 3 }}</p>
       </div>
     </div>
-
-    <!-- 当前持仓 -->
+    <!-- 快捷操作 -->
     <div class="card">
-      <div class="flex items-center justify-between mb-4">
-        <h3 class="text-sm font-medium text-gray-400">当前持仓</h3>
-        <router-link to="/trades" class="text-sm text-primary-400 hover:underline">
-          查看全部 →
-        </router-link>
+      <h3 class="text-sm font-medium text-gray-400 mb-3">快捷操作</h3>
+      <div class="flex flex-wrap gap-2">
+        <button @click="panicSell" class="btn-danger">紧急全平仓</button>
+        <button @click="togglePause" class="btn-ghost">{{ paused ? '恢复交易' : '暂停交易' }}</button>
+        <button @click="runOpt" class="btn-ghost">立即优化</button>
       </div>
-      <TradeTable :trades="tradeStore.openTrades" :loading="tradeStore.loading" />
-    </div>
-
-    <!-- 最近信号 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">最近信号</h3>
-      <SignalList :limit="5" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useTradeStore, useCandidateStore } from '@/stores'
-import api from '@/api'
-import StatCard from '@/components/StatCard.vue'
-import PnlChart from '@/components/PnlChart.vue'
-import DirectionChart from '@/components/DirectionChart.vue'
-import TradeTable from '@/components/TradeTable.vue'
-import SignalList from '@/components/SignalList.vue'
+import { useDashboardStore } from '@/stores'
+import { tradeApi, riskApi, optimizationApi } from '@/api'
 
-const tradeStore = useTradeStore()
-const candidateStore = useCandidateStore()
+const store = useDashboardStore()
+const s = computed(() => store.summary)
+const paused = ref(false)
 
-// 对账状态
-const reconciliation = ref<any>({
-  status: 'inactive',
-  stats: {},
-  circuit_breakers: {},
-})
+const lossPct = computed(() => Math.min(((s.value.daily_loss||0) / (s.value.daily_loss_limit||100)) * 100, 100))
+const tradePct = computed(() => Math.min(((s.value.today_trades||0) / (s.value.max_daily_trades||10)) * 100, 100))
+const lossBarClass = computed(() => lossPct.value > 80 ? 'bg-red-500' : lossPct.value > 50 ? 'bg-yellow-500' : 'bg-emerald-500')
 
-const circuitBreakers = computed(() => reconciliation.value.circuit_breakers || {})
-const discrepancies = computed(() => reconciliation.value.stats?.discrepancies_found || 0)
-
-const reconciliationStatusClass = computed(() => {
-  if (reconciliation.value.status === 'active') {
-    return discrepancies.value > 0 ? 'bg-yellow-400' : 'bg-green-400'
-  }
-  return 'bg-gray-500'
-})
-
-const reconciliationStatusText = computed(() => {
-  if (reconciliation.value.status !== 'active') return '未启动'
-  if (discrepancies.value > 0) return `${discrepancies.value} 个差异`
-  return '同步正常'
-})
-
-const hasOpenBreakers = computed(() => {
-  return Object.values(circuitBreakers.value).some((b: any) => b.state !== 'closed')
-})
-
-function breakerStateClass(state: string) {
-  switch (state) {
-    case 'closed': return 'bg-green-400'
-    case 'half_open': return 'bg-yellow-400'
-    case 'open': return 'bg-red-400'
-    default: return 'bg-gray-400'
-  }
+async function panicSell() {
+  if (!confirm('确定紧急全平仓？')) return
+  await tradeApi.panicCloseAll()
+  alert('平仓指令已发送')
+}
+async function togglePause() {
+  await riskApi.togglePause({ paused: !paused.value, reason: '手动操作' })
+  paused.value = !paused.value
+}
+async function runOpt() {
+  await optimizationApi.run()
+  alert('优化任务已启动')
 }
 
-async function refreshReconciliation() {
-  try {
-    reconciliation.value = await api.get('/reconciliation/status')
-  } catch (e) {
-    console.error('Failed to fetch reconciliation status:', e)
-  }
-}
-
-async function resetBreaker(exchange: string) {
-  try {
-    await api.post('/circuit-breaker/reset', { exchange })
-    await refreshReconciliation()
-  } catch (e) {
-    console.error('Failed to reset breaker:', e)
-  }
-}
-
-async function systemRecover() {
-  if (!confirm('确定要执行系统恢复吗？这将重置所有熔断器。')) return
-  
-  try {
-    const result = await api.post('/system/recover')
-    alert(`系统已恢复，重置了 ${result.reset_breakers} 个熔断器`)
-    await refreshReconciliation()
-  } catch (e) {
-    console.error('Failed to recover system:', e)
-    alert('系统恢复失败')
-  }
-}
-
-const todayPnl = computed(() => {
-  const today = new Date().toISOString().split('T')[0]
-  return tradeStore.trades
-    .filter(t => t.status === 'closed' && t.closed_at?.startsWith(today))
-    .reduce((sum, t) => sum + (t.pnl || 0), 0)
-})
-
-const pnlHistory = computed(() => {
-  // 生成模拟数据，实际从API获取
-  return tradeStore.closedTrades
-    .sort((a, b) => a.closed_at.localeCompare(b.closed_at))
-    .reduce((acc, t) => {
-      const last = acc.length > 0 ? acc[acc.length - 1].value : 0
-      acc.push({
-        date: t.closed_at.split('T')[0],
-        value: last + (t.pnl || 0),
-      })
-      return acc
-    }, [] as { date: string; value: number }[])
-})
-
-const directionData = computed(() => {
-  const short = tradeStore.openTrades.filter(t => t.direction === 'SHORT').length
-  const long = tradeStore.openTrades.filter(t => t.direction === 'LONG').length
-  return [
-    { name: '做空', value: short },
-    { name: '做多', value: long },
-  ]
-})
-
-function formatPnl(value: number): string {
-  const prefix = value >= 0 ? '+' : ''
-  return `${prefix}$${value.toFixed(2)}`
-}
-
-onMounted(() => {
-  tradeStore.fetchTrades()
-  candidateStore.fetchCandidates()
-  refreshReconciliation()
-})
+onMounted(() => store.fetchSummary())
 </script>
