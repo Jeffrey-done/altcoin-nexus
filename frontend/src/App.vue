@@ -32,8 +32,13 @@
         <!-- 系统状态 -->
         <div class="p-4 border-t border-gray-700">
           <div class="flex items-center space-x-2">
-            <span class="w-2 h-2 rounded-full" :class="systemStatusClass"></span>
-            <span class="text-sm text-gray-400">{{ systemStatusText }}</span>
+            <span class="w-2 h-2 rounded-full" :class="wsStatusClass"></span>
+            <span class="text-sm text-gray-400">{{ wsStatusText }}</span>
+          </div>
+          <!-- 通知指示器 -->
+          <div v-if="hasNotifications" class="mt-2 flex items-center space-x-1">
+            <span class="w-2 h-2 rounded-full bg-yellow-400 animate-pulse"></span>
+            <span class="text-xs text-yellow-400">{{ notificationCount }} 条通知</span>
           </div>
         </div>
       </div>
@@ -46,6 +51,11 @@
         <div class="flex items-center justify-between px-6 py-3">
           <h2 class="text-lg font-semibold">{{ currentPageTitle }}</h2>
           <div class="flex items-center space-x-4">
+            <!-- 实时状态指示 -->
+            <div class="flex items-center space-x-2">
+              <span class="w-2 h-2 rounded-full" :class="wsStatusClass"></span>
+              <span class="text-xs text-gray-400">{{ wsStatusText }}</span>
+            </div>
             <!-- 余额显示 -->
             <div class="text-sm">
               <span class="text-gray-400">余额:</span>
@@ -68,6 +78,22 @@
         </router-view>
       </div>
     </main>
+
+    <!-- 通知弹窗 -->
+    <div v-if="showNotification" class="fixed bottom-4 right-4 z-50">
+      <div class="bg-gray-800 border border-gray-700 rounded-lg shadow-lg p-4 max-w-sm">
+        <div class="flex items-start space-x-3">
+          <span class="text-xl">{{ notificationIcon }}</span>
+          <div class="flex-1">
+            <p class="font-medium text-white">{{ notificationTitle }}</p>
+            <p class="text-sm text-gray-400">{{ notificationMessage }}</p>
+          </div>
+          <button @click="dismissNotification" class="text-gray-500 hover:text-white">
+            ✕
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -75,6 +101,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores'
+import { useRealtimeSync } from '@/utils/websocket'
 
 const route = useRoute()
 const systemStore = useSystemStore()
@@ -82,6 +109,17 @@ const systemStore = useSystemStore()
 const currentTime = ref('')
 const balance = ref(1000)
 let timeInterval: ReturnType<typeof setInterval>
+
+// WebSocket 实时同步
+const { startSync, stopSync, connected } = useRealtimeSync()
+
+// 通知状态
+const showNotification = ref(false)
+const notificationTitle = ref('')
+const notificationMessage = ref('')
+const notificationIcon = ref('📢')
+const notificationCount = ref(0)
+const hasNotifications = computed(() => notificationCount.value > 0)
 
 const menuItems = [
   { path: '/', label: '仪表盘', icon: '📊' },
@@ -97,12 +135,12 @@ const currentPageTitle = computed(() => {
   return item?.label || '仪表盘'
 })
 
-const systemStatusClass = computed(() => 
-  systemStore.status ? 'bg-green-400' : 'bg-gray-500'
+const wsStatusClass = computed(() => 
+  connected ? 'bg-green-400' : 'bg-red-400'
 )
 
-const systemStatusText = computed(() => 
-  systemStore.status ? '运行中' : '未连接'
+const wsStatusText = computed(() => 
+  connected ? '实时连接' : '未连接'
 )
 
 function updateTime() {
@@ -113,13 +151,35 @@ function updateTime() {
   })
 }
 
+// 显示通知
+function notify(title: string, message: string, icon: string = '📢') {
+  notificationTitle.value = title
+  notificationMessage.value = message
+  notificationIcon.value = icon
+  showNotification.value = true
+  notificationCount.value++
+  
+  // 自动关闭
+  setTimeout(() => {
+    showNotification.value = false
+  }, 5000)
+}
+
+function dismissNotification() {
+  showNotification.value = false
+}
+
 onMounted(() => {
   updateTime()
   timeInterval = setInterval(updateTime, 1000)
   systemStore.fetchStatus()
+  
+  // 启动 WebSocket 实时同步
+  startSync()
 })
 
 onUnmounted(() => {
   clearInterval(timeInterval)
+  stopSync()
 })
 </script>
