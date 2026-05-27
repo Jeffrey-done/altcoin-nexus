@@ -1,0 +1,25 @@
+global:
+  # 日度限制
+  max_daily_loss: 100
+  max_daily_trades: 10
+  max_daily_trades_short: 6
+  max_daily_trades_long: 4
+
+  # 连亏控制
+  consecutive_loss_pause: 3
+  pause_hours: 4
+
+  # 仓位控制
+  max_position_pct: 0.3
+  default_stake: 33
+  max_stake: 100
+
+  # 冷却
+  cooldown_hours: 1
+  cooldown_scope: "symbol"
+
+# 账户级覆盖
+accounts:
+  default:
+    max_daily_loss: 100
+    max_daily_trades: 10

@@ -1,0 +1,30 @@
+system:
+  # 系统配置
+  version: "4.0.0"
+  environment: "development"
+  debug: false
+  log_level: "INFO"
+
+  # 账户配置
+  account:
+    balance: 1000
+    live_mode: false
+    position_mode: "one_way"
+    baseline_balance: 1000
+
+  # 复利配置
+  compound:
+    enabled: false
+    step: 100
+    increase: 10
+    max_stake: 100
+
+  # 候选池配置
+  candidates:
+    expire_hours: 12
+    check_interval_minutes: 5
+
+  # 调度配置
+  scheduler:
+    task_timeout_seconds: 300
+    scan_interval_minutes: 5
