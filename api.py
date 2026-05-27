@@ -1,18 +1,17 @@
 """
-FastAPI 应用入口
-用于 uvicorn 启动
+Altcoin Nexus - 一体式 Web 入口
+单端口服务，不对外暴露
 """
 
 import sys
 from pathlib import Path
 
-# 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent))
 
-from services.admin import create_app
+from web.app import create_app
 
 app = create_app()
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="127.0.0.1", port=8000)
