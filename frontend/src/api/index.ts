@@ -70,10 +70,18 @@ export const configApi = {
     api.post('/config/update', { section, key, value }),
 }
 
-// === Secrets ===
+// === Accounts (Multi-account exchange keys) ===
+export const accountsApi = {
+  list: (exchange?: string) => api.get('/accounts', { params: { exchange } }),
+  create: (data: any) => api.post('/accounts', data),
+  update: (accountId: string, data: any) => api.put(`/accounts/${accountId}`, data),
+  remove: (accountId: string) => api.delete(`/accounts/${accountId}`),
+  setPrimary: (accountId: string) => api.post(`/accounts/${accountId}/set-primary`),
+  grouped: () => api.get('/accounts/grouped'),
+}
+
+// === Secrets (Telegram only now) ===
 export const secretsApi = {
-  exchanges: () => api.get('/secrets/exchanges'),
-  updateExchange: (data: any) => api.post('/secrets/exchanges', data),
   telegram: () => api.get('/secrets/telegram'),
   updateTelegram: (data: any) => api.post('/secrets/telegram', data),
 }
