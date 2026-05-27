@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import and_, desc, func, select, update, delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .connection import get_db
@@ -300,51 +301,42 @@ class CandidateRepository:
     @staticmethod
     async def upsert(candidate_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        创建或更新候选 - 使用行级锁防止竞态条件
+        创建或更新候选 - 使用原子 upsert 防止竞态条件
         """
         db = await get_db()
         async with db.session() as session:
-            async with session.begin():
-                symbol = candidate_data["symbol"]
-                strategy = candidate_data.get("strategy", "short_overbought")
-                
-                # 序列化metadata
-                if "metadata" in candidate_data and isinstance(candidate_data["metadata"], dict):
-                    candidate_data["metadata_json"] = json.dumps(
-                        candidate_data["metadata"], ensure_ascii=False
-                    )
-                    del candidate_data["metadata"]
-                
-                # 使用 SELECT ... FOR UPDATE 锁定行
-                result = await session.execute(
-                    select(CandidateModel).where(
-                        and_(
-                            CandidateModel.symbol == symbol,
-                            CandidateModel.strategy == strategy,
-                        )
-                    ).with_for_update()
+            candidate_data = dict(candidate_data)
+            candidate_data.setdefault("strategy", "short_overbought")
+            candidate_data.setdefault("direction", "SHORT")
+
+            if "metadata" in candidate_data and isinstance(candidate_data["metadata"], dict):
+                candidate_data["metadata_json"] = json.dumps(
+                    candidate_data["metadata"], ensure_ascii=False
                 )
-                existing = result.scalar_one_or_none()
-                
-                if existing:
-                    # 更新现有记录
-                    for key, value in candidate_data.items():
-                        if hasattr(existing, key) and key not in ("id", "created_at"):
-                            setattr(existing, key, value)
-                    existing.updated_at = _utcnow()
-                    await session.flush()
-                    return {c.name: getattr(existing, c.name) for c in existing.__table__.columns}
-                else:
-                    # 插入新记录
-                    candidate_data.setdefault("strategy", "short_overbought")
-                    candidate_data.setdefault("direction", "SHORT")
-                    candidate = CandidateModel(**{
-                        k: v for k, v in candidate_data.items()
-                        if hasattr(CandidateModel, k)
-                    })
-                    session.add(candidate)
-                    await session.flush()
-                    return {c.name: getattr(candidate, c.name) for c in candidate.__table__.columns}
+                del candidate_data["metadata"]
+
+            model_fields = {c.name for c in CandidateModel.__table__.columns}
+            insert_data = {k: v for k, v in candidate_data.items() if k in model_fields and k != "id"}
+
+            now = _utcnow()
+            insert_data.setdefault("created_at", now)
+            insert_data["updated_at"] = now
+
+            update_data = {
+                k: v for k, v in insert_data.items()
+                if k not in ("id", "created_at", "symbol", "strategy")
+            }
+            update_data["updated_at"] = now
+
+            stmt = pg_insert(CandidateModel).values(**insert_data)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["symbol", "strategy"],
+                set_=update_data,
+            ).returning(CandidateModel)
+
+            result = await session.execute(stmt)
+            row = result.scalar_one()
+            return {c.name: getattr(row, c.name) for c in row.__table__.columns}
 
     @staticmethod
     async def get_active(
@@ -422,25 +414,22 @@ class RiskRepository:
         today = _today_str()
         db = await get_db()
         async with db.session() as session:
+            stmt = pg_insert(RiskStateModel).values(account_id=account_id, date=today)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["account_id", "date"])
+            await session.execute(stmt)
+
             result = await session.execute(
-                select(RiskStateModel).where(
+                select(RiskStateModel)
+                .where(
                     and_(
                         RiskStateModel.account_id == account_id,
                         RiskStateModel.date == today,
                     )
                 )
+                .with_for_update()
             )
-            state = result.scalar_one_or_none()
-            
-            if state:
-                return {c.name: getattr(state, c.name) for c in state.__table__.columns}
-            
-            # 创建新的今日状态
-            new_state = RiskStateModel(account_id=account_id, date=today)
-            session.add(new_state)
-            await session.flush()
-            await session.refresh(new_state)
-            return {c.name: getattr(new_state, c.name) for c in new_state.__table__.columns}
+            state = result.scalar_one()
+            return {c.name: getattr(state, c.name) for c in state.__table__.columns}
 
     @staticmethod
     async def update(account_id: str, updates: Dict[str, Any]) -> bool:

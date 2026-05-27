@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.pool import NullPool
+from sqlalchemy import text
 
 from core.config import get_settings
 
@@ -26,27 +26,33 @@ class AsyncDatabase:
         self._url = url or self._settings.database.url
         self._engine: Optional[AsyncEngine] = None
         self._session_factory: Optional[async_sessionmaker] = None
+        # Guard async initialization to avoid duplicate pools under concurrency.
+        self._init_lock = asyncio.Lock()
     
     async def initialize(self) -> None:
         """初始化数据库连接"""
         if self._engine is not None:
             return
-        
-        self._engine = create_async_engine(
-            self._url,
-            echo=self._settings.database.echo,
-            pool_size=self._settings.database.pool_size,
-            max_overflow=self._settings.database.max_overflow,
-            pool_timeout=self._settings.database.pool_timeout,
-            pool_recycle=self._settings.database.pool_recycle,
-            pool_pre_ping=True,
-        )
-        
-        self._session_factory = async_sessionmaker(
-            bind=self._engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-        )
+
+        async with self._init_lock:
+            if self._engine is not None:
+                return
+
+            self._engine = create_async_engine(
+                self._url,
+                echo=self._settings.database.echo,
+                pool_size=self._settings.database.pool_size,
+                max_overflow=self._settings.database.max_overflow,
+                pool_timeout=self._settings.database.pool_timeout,
+                pool_recycle=self._settings.database.pool_recycle,
+                pool_pre_ping=True,
+            )
+
+            self._session_factory = async_sessionmaker(
+                bind=self._engine,
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
     
     async def close(self) -> None:
         """关闭数据库连接"""
@@ -110,7 +116,7 @@ class AsyncDatabase:
                 await self.initialize()
             
             async with self._engine.connect() as conn:
-                await conn.execute("SELECT 1")
+                await conn.execute(text("SELECT 1"))
             return True
         except Exception:
             return False

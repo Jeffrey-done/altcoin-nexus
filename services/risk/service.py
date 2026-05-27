@@ -176,6 +176,8 @@ class RiskControlService(ConfigRefreshMixin):
         self._stats["checks_total"] += 1
         
         # 快速风控检查 - 异常时默认拒绝
+        can_open = False
+        reason = "Risk system initialization state"
         try:
             can_open, reason = await self.check_can_open(
                 account_id=account_id,
@@ -184,8 +186,12 @@ class RiskControlService(ConfigRefreshMixin):
                 stake=stake,
             )
         except Exception as e:
-            logger.critical(f"Risk check FAILED with exception: {e} - BLOCKING signal")
-            can_open, reason = False, f"Risk check exception: {e}"
+            logger.critical(
+                f"CRITICAL: Risk check encountered exception: {e} - FORCE BLOCK",
+                exc_info=True,
+            )
+            can_open = False
+            reason = f"Internal Risk Exception: {e}"
         
         if not can_open:
             self._stats["blocks_total"] += 1
@@ -488,9 +494,8 @@ class RiskControlService(ConfigRefreshMixin):
         pnl: float,
     ) -> None:
         """记录平仓 - 使用行级锁"""
-        # 累加日亏损（使用行级锁）
         if pnl < 0:
-            await RiskRepository.add_daily_loss(account_id, abs(pnl))
+            await self.increment_daily_loss(account_id, pnl)
         
         # 更新连续亏损
         consecutive_losses = await TradeRepository.get_consecutive_losses(account_id)
@@ -512,6 +517,30 @@ class RiskControlService(ConfigRefreshMixin):
             "account_id": account_id,
             "trade_id": trade_id,
             "pnl": pnl,
+        })
+
+    async def increment_daily_loss(self, account_id: str, pnl: float) -> None:
+        """
+        累加日亏损并立即持久化。
+
+        仅处理亏损，盈利不增加亏损度量。
+        """
+        if pnl >= 0:
+            return
+
+        loss_amount = abs(pnl)
+
+        if account_id not in self._risk_cache:
+            self._risk_cache[account_id] = {"daily_loss": 0.0}
+
+        self._risk_cache[account_id]["daily_loss"] = (
+            self._risk_cache[account_id].get("daily_loss", 0.0) + loss_amount
+        )
+        current_total_loss = self._risk_cache[account_id]["daily_loss"]
+
+        await RiskRepository.update_with_lock(account_id, {
+            "daily_loss": current_total_loss,
+            "updated_at": datetime.now(timezone.utc),
         })
     
     async def get_risk_status(self, account_id: str) -> Dict[str, Any]:
