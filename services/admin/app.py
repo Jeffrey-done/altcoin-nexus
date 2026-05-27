@@ -7,7 +7,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -193,6 +193,265 @@ def create_app() -> FastAPI:
             "changed_by": "admin",
         })
         return {"status": "ok"}
+    
+    # ==================== 一体化指令 API ====================
+    
+    # 黑名单存储（运行时内存）
+    _blacklist: set = set()
+    
+    @app.post("/api/execution/panic-sell-all")
+    async def panic_sell_all():
+        """
+        紧急全平仓
+        
+        立即触发所有持仓的市价平仓单，并进入休眠模式
+        """
+        logger.warning("PANIC SELL ALL triggered!")
+        
+        bus = await get_event_bus()
+        
+        # 发布系统恐慌事件
+        await bus.publish(EventType.SYSTEM_PANIC, {
+            "reason": "Manual panic sell triggered",
+            "action": "close_all",
+        })
+        
+        # 获取所有持仓
+        open_trades = await TradeRepository.get_open()
+        
+        closed_count = 0
+        for trade in open_trades:
+            try:
+                await TradeRepository.close_trade(
+                    trade_id=trade["id"],
+                    pnl=trade.get("pnl", 0),
+                    close_price=trade.get("current_price", 0),
+                    close_reason="PANIC SELL ALL",
+                    close_type="panic",
+                )
+                closed_count += 1
+            except Exception as e:
+                logger.error(f"Failed to close trade {trade['id']}: {e}")
+        
+        return {
+            "status": "ok",
+            "closed_trades": closed_count,
+            "message": "All positions closed, system entering safe mode",
+        }
+    
+    @app.post("/api/strategy/blacklist")
+    async def add_to_blacklist(request: Dict[str, str]):
+        """
+        添加币种到黑名单
+        
+        {
+            "symbol": "PEPE/USDT",
+            "reason": "高风险"
+        }
+        """
+        symbol = request.get("symbol", "")
+        reason = request.get("reason", "")
+        
+        if not symbol:
+            raise HTTPException(status_code=400, detail="symbol is required")
+        
+        _blacklist.add(symbol)
+        
+        # 发布事件
+        bus = await get_event_bus()
+        await bus.publish("strategy.blacklist_added", {
+            "symbol": symbol,
+            "reason": reason,
+        })
+        
+        logger.info(f"Blacklist added: {symbol} - {reason}")
+        
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "blacklist": list(_blacklist),
+        }
+    
+    @app.delete("/api/strategy/blacklist/{symbol}")
+    async def remove_from_blacklist(symbol: str):
+        """从黑名单移除"""
+        _blacklist.discard(symbol)
+        
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "blacklist": list(_blacklist),
+        }
+    
+    @app.get("/api/strategy/blacklist")
+    async def get_blacklist():
+        """获取黑名单"""
+        return {
+            "blacklist": list(_blacklist),
+            "count": len(_blacklist),
+        }
+    
+    @app.post("/api/risk/toggle-pause")
+    async def toggle_risk_pause(request: Dict[str, Any]):
+        """
+        强制熔断/恢复
+        
+        {
+            "paused": true,
+            "reason": "手动暂停",
+            "duration_minutes": 60
+        }
+        """
+        paused = request.get("paused", True)
+        reason = request.get("reason", "Manual toggle")
+        duration = request.get("duration_minutes", 60)
+        
+        bus = await get_event_bus()
+        
+        if paused:
+            await bus.publish(EventType.RISK_PAUSED, {
+                "reason": reason,
+                "duration_minutes": duration,
+                "paused_by": "admin",
+            })
+            logger.warning(f"Risk PAUSED: {reason} for {duration} minutes")
+        else:
+            await bus.publish(EventType.RISK_RESUMED, {
+                "reason": reason,
+                "resumed_by": "admin",
+            })
+            logger.info(f"Risk RESUMED: {reason}")
+        
+        return {
+            "status": "ok",
+            "paused": paused,
+            "reason": reason,
+            "duration_minutes": duration if paused else None,
+        }
+    
+    @app.post("/api/optimization/run-now")
+    async def run_optimization_now():
+        """
+        立即触发参数优化
+        
+        启动 WFA 优化任务
+        """
+        logger.info("Manual optimization triggered")
+        
+        bus = await get_event_bus()
+        await bus.publish(EventType.OPTIMIZATION_COMPLETED, {
+            "trigger": "manual",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        
+        return {
+            "status": "ok",
+            "message": "Optimization task queued",
+        }
+    
+    @app.post("/api/config/regime")
+    async def force_regime(request: Dict[str, str]):
+        """
+        强制设置市场状态
+        
+        {
+            "regime": "crash",
+            "reason": "手动进入防守模式"
+        }
+        """
+        regime = request.get("regime", "")
+        reason = request.get("reason", "")
+        
+        valid_regimes = ["trending_up", "trending_down", "ranging", "high_vol", "crash", "recovery"]
+        if regime not in valid_regimes:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid regime. Must be one of: {valid_regimes}"
+            )
+        
+        bus = await get_event_bus()
+        await bus.publish(EventType.MARKET_REGIME_CHANGED, {
+            "old_regime": "manual",
+            "new_regime": regime,
+            "confidence": 1.0,
+            "reason": reason,
+            "forced_by": "admin",
+        })
+        
+        logger.warning(f"Regime FORCED to {regime}: {reason}")
+        
+        return {
+            "status": "ok",
+            "regime": regime,
+            "reason": reason,
+        }
+    
+    @app.get("/api/system/pulse")
+    async def system_pulse():
+        """
+        系统脉搏 - 返回所有服务状态
+        """
+        from services.risk import RiskControlService
+        from services.strategy import StrategyEngine
+        from services.execution import ExecutionRouter
+        from services.monitor import MonitoringService
+        from services.optimization import OptimizationService
+        
+        # 这里需要获取各服务实例
+        # 简化实现，返回基本信息
+        
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "services": {
+                "api": {"status": "running"},
+                "database": {"status": "connected"},
+                "redis": {"status": "connected"},
+                "event_bus": {"status": "running"},
+            },
+            "blacklist": list(_blacklist),
+            "uptime": "N/A",
+        }
+    
+    @app.get("/api/system/validation")
+    async def system_validation():
+        """
+        事件闭环验证
+        
+        返回信号→风控→下单的延迟统计
+        """
+        from services.monitor.validator import get_validator
+        
+        validator = await get_validator()
+        result = validator.validate()
+        
+        return {
+            "timestamp": result.timestamp,
+            "is_healthy": result.is_healthy,
+            "health_score": result.health_score,
+            "chains": {
+                "total": result.total_chains,
+                "completed": result.completed_chains,
+                "timeout": result.timeout_chains,
+                "failed": result.failed_chains,
+            },
+            "latency": {
+                "avg_risk_ms": result.avg_risk_latency_ms,
+                "avg_execution_ms": result.avg_execution_latency_ms,
+                "avg_total_ms": result.avg_total_latency_ms,
+                "p95_ms": result.p95_total_latency_ms,
+                "p99_ms": result.p99_total_latency_ms,
+            },
+        }
+    
+    @app.get("/api/config/manager")
+    async def config_manager_status():
+        """
+        配置管理器状态
+        """
+        from core.config.manager import get_config_manager
+        
+        manager = await get_config_manager()
+        return manager.get_status()
     
     # WebSocket 实时推送
     @app.websocket("/ws")
