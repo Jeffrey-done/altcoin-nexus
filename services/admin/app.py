@@ -207,7 +207,7 @@ def create_app() -> FastAPI:
     
     # 配置管理
     @app.get("/api/config")
-    async def get_config():
+    async def get_config(user: str = Depends(get_current_user)):  # 需要认证
         return {
             "exchange": {
                 "primary_exchange": settings.exchange.primary_exchange,
@@ -218,11 +218,13 @@ def create_app() -> FastAPI:
                 "max_daily_loss": settings.risk.max_daily_loss,
                 "max_daily_trades": settings.risk.max_daily_trades,
                 "consecutive_loss_pause": settings.risk.consecutive_loss_pause,
+                "pause_hours": settings.risk.pause_hours,
             },
             "strategy": {
                 "vol_min": settings.strategy.vol_min,
                 "daily_rsi_min": settings.strategy.daily_rsi_min,
                 "hard_stop_pct": settings.strategy.hard_stop_pct,
+                "tp1_pct": settings.strategy.tp1_pct,
             },
         }
     
@@ -231,14 +233,64 @@ def create_app() -> FastAPI:
         request: ConfigUpdateRequest,
         user: str = Depends(require_admin),  # 需要管理员权限
     ):
-        # 发布配置变更事件
-        bus = await get_event_bus()
-        await bus.publish(EventType.CONFIG_CHANGED, {
-            "key": request.key,
-            "value": request.value,
-            "changed_by": user,
-        })
-        return {"status": "ok"}
+        """
+        更新配置
+        
+        支持的配置键:
+        - exchange.primary_exchange
+        - exchange.leverage
+        - exchange.max_open_trades
+        - risk.max_daily_loss
+        - risk.max_daily_trades
+        - risk.consecutive_loss_pause
+        - risk.pause_hours
+        - strategy.vol_min
+        - strategy.daily_rsi_min
+        - strategy.hard_stop_pct
+        - strategy.tp1_pct
+        """
+        key = request.key
+        value = request.value
+        
+        # 更新内存中的配置
+        try:
+            parts = key.split(".")
+            if len(parts) == 2:
+                section, field = parts
+                if hasattr(settings, section):
+                    sub_settings = getattr(settings, section)
+                    if hasattr(sub_settings, field):
+                        # 类型转换
+                        current_value = getattr(sub_settings, field)
+                        if isinstance(current_value, int):
+                            value = int(value)
+                        elif isinstance(current_value, float):
+                            value = float(value)
+                        
+                        setattr(sub_settings, field, value)
+                        
+                        # 持久化到数据库
+                        from core.db import SystemStateRepository
+                        await SystemStateRepository.set(f"config.{key}", str(value))
+                        
+                        # 发布配置变更事件
+                        bus = await get_event_bus()
+                        await bus.publish(EventType.CONFIG_CHANGED, {
+                            "key": key,
+                            "value": value,
+                            "changed_by": user,
+                        })
+                        
+                        logger.info(f"Config updated by {user}: {key} = {value}")
+                        return {"status": "ok", "key": key, "value": value}
+            
+            raise HTTPException(status_code=400, detail=f"Invalid config key: {key}")
+        
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid value type: {e}")
+        except Exception as e:
+            logger.error(f"Failed to update config: {e}")
+            raise HTTPException(status_code=500, detail="Failed to update config")
     
     # ==================== 一体化指令 API ====================
     
