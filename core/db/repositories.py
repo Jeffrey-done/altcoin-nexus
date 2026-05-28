@@ -383,7 +383,7 @@ class CandidateRepository:
             
             result = await session.execute(query.order_by(CandidateModel.added_at))
             candidates = result.scalars().all()
-            return [{c.name: getattr(c, c.name) for c in c.__table__.columns} for c in candidates]
+            return [{col.name: getattr(c, col.name) for col in c.__table__.columns} for c in candidates]
 
     @staticmethod
     async def mark_triggered(

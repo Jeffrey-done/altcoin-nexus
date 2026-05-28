@@ -68,74 +68,82 @@ class DataFeedService:
         logger.info("DataFeedService stopped")
     
     async def _init_exchanges(self) -> None:
-        """初始化交易所连接"""
+        """初始化交易所连接 - 始终初始化用于公开API，有密钥时额外启用私有API"""
         config = self._settings.exchange
         
-        # Binance
-        if config.binance_api_key:
-            try:
-                self._exchanges["binance"] = ccxt.binance({
-                    "apiKey": config.binance_api_key,
-                    "secret": config.binance_api_secret,
-                    "enableRateLimit": True,
-                    "options": {"defaultType": "future"},
-                })
-                logger.info("Binance exchange initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Binance: {e}")
+        # 始终初始化主交易所（公开API不需要密钥）
+        exchange_configs = {
+            "binance": {
+                "cls": ccxt.binance,
+                "key": config.binance_api_key,
+                "secret": config.binance_api_secret,
+                "extra": {"options": {"defaultType": "future"}},
+            },
+            "okx": {
+                "cls": ccxt.okx,
+                "key": config.okx_api_key,
+                "secret": config.okx_api_secret,
+                "passphrase": config.okx_passphrase,
+                "extra": {},
+            },
+            "bybit": {
+                "cls": ccxt.bybit,
+                "key": config.bybit_api_key,
+                "secret": config.bybit_api_secret,
+                "extra": {"options": {"defaultType": "linear"}},
+            },
+            "gate": {
+                "cls": ccxt.gate,
+                "key": config.gate_api_key,
+                "secret": config.gate_api_secret,
+                "extra": {"options": {"defaultType": "future"}},
+            },
+            "bitget": {
+                "cls": ccxt.bitget,
+                "key": config.bitget_api_key,
+                "secret": config.bitget_api_secret,
+                "passphrase": config.bitget_passphrase,
+                "extra": {"options": {"defaultType": "future"}},
+            },
+        }
         
-        # OKX
-        if config.okx_api_key:
-            try:
-                self._exchanges["okx"] = ccxt.okx({
-                    "apiKey": config.okx_api_key,
-                    "secret": config.okx_api_secret,
-                    "password": config.okx_passphrase,
-                    "enableRateLimit": True,
-                })
-                logger.info("OKX exchange initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize OKX: {e}")
+        primary = config.primary_exchange
+        proxy = config.proxy  # 可选代理，本地开发用，服务器留空直连
         
-        # Bybit
-        if config.bybit_api_key:
+        for name, ex_cfg in exchange_configs.items():
+            # 主交易所始终初始化，其他交易所仅在有密钥时初始化
+            if name != primary and not ex_cfg["key"]:
+                continue
+            
             try:
-                self._exchanges["bybit"] = ccxt.bybit({
-                    "apiKey": config.bybit_api_key,
-                    "secret": config.bybit_api_secret,
+                params = {
                     "enableRateLimit": True,
-                    "options": {"defaultType": "linear"},
-                })
-                logger.info("Bybit exchange initialized")
+                    **ex_cfg["extra"],
+                }
+                # 有密钥时添加认证信息（用于下单、查询持仓等私有API）
+                if ex_cfg["key"]:
+                    params["apiKey"] = ex_cfg["key"]
+                    params["secret"] = ex_cfg["secret"]
+                    if ex_cfg.get("passphrase"):
+                        params["password"] = ex_cfg["passphrase"]
+                    auth_status = "authenticated"
+                else:
+                    auth_status = "public-only (no API key)"
+                
+                # 代理支持（本地开发时通过代理访问交易所，服务器留空直连）
+                if proxy:
+                    params["httpsProxy"] = proxy
+                    logger.info(f"Using proxy for {name}: {proxy}")
+                
+                self._exchanges[name] = ex_cfg["cls"](params)
+                logger.info(f"{name.capitalize()} exchange initialized ({auth_status})")
             except Exception as e:
-                logger.error(f"Failed to initialize Bybit: {e}")
+                logger.error(f"Failed to initialize {name}: {e}")
         
-        # Gate.io
-        if config.gate_api_key:
-            try:
-                self._exchanges["gate"] = ccxt.gate({
-                    "apiKey": config.gate_api_key,
-                    "secret": config.gate_api_secret,
-                    "enableRateLimit": True,
-                    "options": {"defaultType": "future"},
-                })
-                logger.info("Gate.io exchange initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Gate.io: {e}")
-        
-        # Bitget
-        if config.bitget_api_key:
-            try:
-                self._exchanges["bitget"] = ccxt.bitget({
-                    "apiKey": config.bitget_api_key,
-                    "secret": config.bitget_api_secret,
-                    "password": config.bitget_passphrase,
-                    "enableRateLimit": True,
-                    "options": {"defaultType": "future"},
-                })
-                logger.info("Bitget exchange initialized")
-            except Exception as e:
-                logger.error(f"Failed to initialize Bitget: {e}")
+        if not self._exchanges:
+            logger.warning("No exchanges initialized - scanner will not work")
+        else:
+            logger.info(f"Initialized {len(self._exchanges)} exchange(s): {list(self._exchanges.keys())}")
     
     async def get_ticker(
         self,

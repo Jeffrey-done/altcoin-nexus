@@ -3,7 +3,7 @@
     <label class="label">{{ label }}</label>
     <div class="flex gap-2">
       <template v-if="type === 'bool'">
-        <button @click="toggle" class="input text-left" :class="localVal ? 'border-emerald-500' : 'border-gray-600'">
+        <button @click="toggle" class="input text-left" :style="localVal ? 'border-color: rgba(34,197,94,0.4); color: #22c55e;' : ''">
           {{ localVal ? '启用' : '禁用' }}
         </button>
       </template>
@@ -15,7 +15,7 @@
       <template v-else>
         <input v-model="localVal" :type="type === 'number' ? 'number' : 'text'" class="input flex-1" :step="type==='number'?'any':undefined" />
       </template>
-      <button @click="save" class="btn-primary text-xs px-3">保存</button>
+      <button @click="save" class="btn-primary text-[9px] px-3">保存</button>
     </div>
   </div>
 </template>

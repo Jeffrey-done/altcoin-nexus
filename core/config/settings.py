@@ -9,12 +9,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
+from dotenv import load_dotenv
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # 项目根目录
 PROJECT_ROOT = Path(__file__).parent.parent.parent
+
+# 预加载 .env 到 OS 环境变量，使子配置也能读取
+load_dotenv(PROJECT_ROOT / ".env")
 
 
 class DatabaseSettings(BaseSettings):
@@ -71,6 +75,9 @@ class ExchangeSettings(BaseSettings):
     leverage: int = 10
     max_open_trades: int = 8
     position_mode: str = "one_way"
+    
+    # 代理（可选，本地开发用，服务器留空直连）
+    proxy: str = ""
     
     # 滑点控制
     slippage_alert_pct: float = 0.5
@@ -197,6 +204,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
     
     # 系统信息

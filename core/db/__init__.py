@@ -3,7 +3,7 @@
 基于 SQLAlchemy asyncio + asyncpg
 """
 
-from .connection import AsyncDatabase, get_db
+from .connection import AsyncDatabase, get_db, close_db
 from .models import Base, TradeModel, CandidateModel, RiskStateModel, ExecutionEventModel, ExchangeAccountModel
 from .repositories import (
     TradeRepository,

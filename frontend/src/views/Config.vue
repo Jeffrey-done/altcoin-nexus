@@ -1,63 +1,68 @@
 <template>
-  <div class="p-6 space-y-6">
-    <h2 class="text-xl font-bold">策略与系统配置</h2>
-    <!-- 策略参数 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">策略参数 (short_overbought)</h3>
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <ConfigField v-for="f in strategyFields" :key="f.key" :label="f.label" :section="'strategy'" :field="f.key" :value="cfg.strategy?.[f.key]" :type="f.type" @save="saveConfig" />
+  <div class="min-h-screen" style="background: #0a0e1a;">
+    <header class="px-8 py-4" style="border-bottom: 1px solid #1e2740;">
+      <h1 class="text-heading text-steel-100">策略与系统配置</h1>
+      <p class="text-label text-steel-500 mt-0.5">策略参数、风控、交易所、监控配置</p>
+    </header>
+    <div class="p-8 space-y-6">
+      <!-- 策略参数 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">策略参数</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+          <ConfigField v-for="f in strategyFields" :key="f.key" :label="f.label" :section="'strategy'" :field="f.key" :value="cfg.strategy?.[f.key]" :type="f.type" @save="saveConfig" />
+        </div>
       </div>
-    </div>
-    <!-- 风控参数 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">风控参数</h3>
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <ConfigField v-for="f in riskFields" :key="f.key" :label="f.label" :section="'risk'" :field="f.key" :value="cfg.risk?.[f.key]" :type="f.type" @save="saveConfig" />
+      <!-- 风控参数 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">风控参数</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+          <ConfigField v-for="f in riskFields" :key="f.key" :label="f.label" :section="'risk'" :field="f.key" :value="cfg.risk?.[f.key]" :type="f.type" @save="saveConfig" />
+        </div>
       </div>
-    </div>
-    <!-- 交易所参数 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">交易所参数</h3>
-      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        <ConfigField v-for="f in exchangeFields" :key="f.key" :label="f.label" :section="'exchange'" :field="f.key" :value="cfg.exchange?.[f.key]" :type="f.type" :options="f.options" @save="saveConfig" />
+      <!-- 交易所参数 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">交易所参数</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mt-4">
+          <ConfigField v-for="f in exchangeFields" :key="f.key" :label="f.label" :section="'exchange'" :field="f.key" :value="cfg.exchange?.[f.key]" :type="f.type" :options="f.options" @save="saveConfig" />
+        </div>
       </div>
-    </div>
-    <!-- 监控参数 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">监控参数</h3>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <ConfigField v-for="f in monitorFields" :key="f.key" :label="f.label" :section="'monitoring'" :field="f.key" :value="cfg.monitoring?.[f.key]" :type="f.type" @save="saveConfig" />
+      <!-- 监控参数 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">监控参数</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <ConfigField v-for="f in monitorFields" :key="f.key" :label="f.label" :section="'monitoring'" :field="f.key" :value="cfg.monitoring?.[f.key]" :type="f.type" @save="saveConfig" />
+        </div>
       </div>
-    </div>
-    <!-- 优化参数 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">WFA 优化</h3>
-      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <ConfigField v-for="f in optFields" :key="f.key" :label="f.label" :section="'optimization'" :field="f.key" :value="cfg.optimization?.[f.key]" :type="f.type" @save="saveConfig" />
+      <!-- 优化参数 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">WFA 优化</span>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+          <ConfigField v-for="f in optFields" :key="f.key" :label="f.label" :section="'optimization'" :field="f.key" :value="cfg.optimization?.[f.key]" :type="f.type" @save="saveConfig" />
+        </div>
       </div>
-    </div>
-    <!-- 黑名单 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">黑名单管理</h3>
-      <div class="flex gap-2 mb-3">
-        <input v-model="newBlack" class="input flex-1" placeholder="PEPE/USDT" @keyup.enter="addBlack" />
-        <button @click="addBlack" class="btn-primary">添加</button>
+      <!-- 黑名单 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">黑名单管理</span>
+        <div class="flex gap-2 mt-4 mb-4">
+          <input v-model="newBlack" class="input flex-1" placeholder="PEPE/USDT" @keyup.enter="addBlack" />
+          <button @click="addBlack" class="btn-primary">添加</button>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <span v-for="s in blacklist" :key="s" class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-mono" style="background: rgba(255,255,255,0.04); border: 1px solid #1e2740;">
+            {{ s }} <button @click="removeBlack(s)" class="text-loss hover:text-red-300 ml-1">×</button>
+          </span>
+          <span v-if="blacklist.length===0" class="text-steel-500 text-[11px]">黑名单为空</span>
+        </div>
       </div>
-      <div class="flex flex-wrap gap-2">
-        <span v-for="s in blacklist" :key="s" class="inline-flex items-center gap-1 px-2 py-1 bg-gray-700 rounded text-xs">
-          {{ s }} <button @click="removeBlack(s)" class="text-red-400 hover:text-red-300 ml-1">×</button>
-        </span>
-        <span v-if="blacklist.length===0" class="text-gray-500 text-xs">空</span>
-      </div>
-    </div>
-    <!-- 市场状态 -->
-    <div class="card">
-      <h3 class="text-sm font-medium text-gray-400 mb-4">强制市场状态</h3>
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
-        <button v-for="r in regimes" :key="r.value" @click="forceRegime(r.value)" class="p-3 rounded-lg text-center bg-gray-700 hover:bg-gray-600 transition">
-          <span class="text-xl">{{ r.icon }}</span>
-          <p class="text-[10px] mt-1 text-gray-400">{{ r.label }}</p>
-        </button>
+      <!-- 市场状态 -->
+      <div class="card p-5">
+        <span class="text-label text-steel-500">强制市场状态</span>
+        <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2 mt-4">
+          <button v-for="r in regimes" :key="r.value" @click="forceRegime(r.value)" class="p-3 rounded-card text-center transition-all hover:scale-[1.02]" style="background: rgba(255,255,255,0.03); border: 1px solid #1e2740;">
+            <span class="text-lg">{{ r.icon }}</span>
+            <p class="text-[10px] mt-1 text-steel-400">{{ r.label }}</p>
+          </button>
+        </div>
       </div>
     </div>
   </div>
