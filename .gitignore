@@ -79,3 +79,4 @@ admin_secrets.json
 
 # Docker
 docker-compose.override.yml
+node_modules/
