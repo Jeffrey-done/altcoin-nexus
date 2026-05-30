@@ -20,7 +20,7 @@
           <div class="flex items-center gap-2 mt-3">
             <span :class="validation?.is_healthy ? 'status-dot-active' : 'status-dot-error'"></span>
             <span class="text-data font-medium" :class="validation?.is_healthy ? 'text-gain' : 'text-loss'">
-              得分: {{ (validation?.health_score * 100)?.toFixed(1) }}%
+              得分: {{ (validation?.health_score)?.toFixed(1) }}%
             </span>
           </div>
           <p class="text-[10px] font-mono text-steel-500 mt-2">完成: {{ validation?.chains?.completed || 0 }} / 失败: {{ validation?.chains?.failed || 0 }}</p>
